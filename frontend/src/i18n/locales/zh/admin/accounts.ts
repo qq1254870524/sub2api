@@ -1,4 +1,4 @@
-export default {
+﻿export default {
     accounts: {
       title: '账号管理',
       description: '管理 AI 平台账号和 Cookie',
@@ -28,7 +28,7 @@ export default {
       dataExportedSkippedShadows: '数据已导出。已跳过 {count} 个 spark 影子账号：其调度配置不在备份内，还原后需在重建的影子上重新调优。',
       dataExportFailed: '数据导出失败',
       dataImportTitle: '导入数据',
-      dataImportHint: '上传导出的 JSON 文件以批量导入账号与代理。',
+      dataImportHint: '上传 Sub2API 导出备份，或 CLIProxy/CPA 的 xai-*.json（type=xai / auth_kind=oauth）批量导入 Grok OAuth 账号。',
       dataImportWarning: '导入将创建新账号与代理，分组需手工绑定；请确认已有数据不会冲突。',
       dataImportFile: '数据文件',
       dataImportButton: '开始导入',
@@ -36,7 +36,7 @@ export default {
       dataImportSelectFile: '请选择数据文件',
       dataImportParseFailed: '数据解析失败',
       dataImportParseFailedFile: '文件 {name} 解析失败',
-      dataImportInvalidFile: '文件 {name} 不是受支持的导出数据文件',
+      dataImportInvalidFile: '文件 {name} 不是受支持的导出备份，也不是 CPA/xai OAuth JSON',
       dataImportIgnoredFiles: '已忽略 {count} 个非 JSON 文件',
       dataImportFailed: '数据导入失败',
       dataImportResult: '导入结果',
@@ -1340,3 +1340,4 @@ export default {
 
     // Scheduled Tests
 }
+

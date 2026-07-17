@@ -1,4 +1,4 @@
-export default {
+﻿export default {
     accounts: {
       title: 'Account Management',
       description: 'Manage AI platform accounts and credentials',
@@ -28,7 +28,7 @@ export default {
       dataExportedSkippedShadows: 'Data exported. Skipped {count} spark shadow account(s): their scheduling config is not included in the backup; recreate and re-tune them after restore.',
       dataExportFailed: 'Failed to export data',
       dataImportTitle: 'Import Data',
-      dataImportHint: 'Upload the exported JSON file to import accounts and proxies.',
+      dataImportHint: 'Upload a Sub2API backup export, or CLIProxy/CPA xai-*.json (type=xai / auth_kind=oauth) to import Grok OAuth accounts.',
       dataImportWarning: 'Import will create new accounts/proxies; groups must be bound manually. Ensure existing data does not conflict.',
       dataImportFile: 'Data file',
       dataImportButton: 'Start Import',
@@ -36,7 +36,7 @@ export default {
       dataImportSelectFile: 'Please select a data file',
       dataImportParseFailed: 'Failed to parse data file',
       dataImportParseFailedFile: 'Failed to parse {name}',
-      dataImportInvalidFile: '{name} is not a supported data export file',
+      dataImportInvalidFile: '{name} is neither a supported backup export nor a CPA/xai OAuth JSON file',
       dataImportIgnoredFiles: 'Ignored {count} non-JSON file(s)',
       dataImportFailed: 'Data import failed',
       dataImportResult: 'Import Result',
@@ -1326,3 +1326,4 @@ export default {
 
     // Scheduled Tests
 }
+

@@ -23,3 +23,13 @@ Client-side import via `POST /api/v1/admin/accounts` (used by grok-regkit `sub2a
 - https://github.com/qq1254870524/grok-regkit-services
 
 Do not commit real admin passwords, OAuth tokens, or production `config.yaml` secrets.
+
+## Web UI: Import Data accepts CPA xai JSON
+
+`frontend/src/components/admin/account/ImportDataModal.vue` now auto-detects CLIProxy/CPA `xai-*.json` (`type=xai`, `auth_kind=oauth`) and converts them into Sub2API backup payload (`type=sub2api-data`) before calling `POST /api/v1/admin/accounts/data`.
+
+This removes the false error when users upload CPA OAuth files into the admin Import Data dialog.
+
+Still true:
+- stock `weishaw/sub2api:latest` image does not include this UI patch until you rebuild frontend or replace image.
+- without rebuild, use grok-regkit client import: `python -B scripts/import_cpa_to_sub2api.py --dir <cpa_dir>`

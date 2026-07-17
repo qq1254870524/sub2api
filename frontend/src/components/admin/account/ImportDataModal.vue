@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <BaseDialog
     :show="show"
     :title="t('admin.accounts.dataImportTitle')"
@@ -227,9 +227,137 @@ const readFileAsText = async (sourceFile: File): Promise<string> => {
 const SUPPORTED_DATA_TYPES = ['sub2api-data', 'sub2api-bundle']
 const SUPPORTED_DATA_VERSION = 1
 
+const asRecord = (value: unknown): Record<string, unknown> | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+const firstString = (obj: Record<string, unknown>, ...keys: string[]): string => {
+  for (const key of keys) {
+    const value = obj[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return ''
+}
+
+const decodeJwtPayload = (token: string): Record<string, unknown> | null => {
+  try {
+    const parts = token.split('.')
+    if (parts.length < 2) return null
+    let raw = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    while (raw.length % 4) raw += '='
+    const json = atob(raw)
+    const parsed = JSON.parse(json)
+    return asRecord(parsed)
+  } catch {
+    return null
+  }
+}
+
+const isCpaXaiOAuthPayload = (payload: unknown): boolean => {
+  const obj = asRecord(payload)
+  if (!obj) return false
+  const type = String(obj.type || '').toLowerCase()
+  const authKind = String(obj.auth_kind || obj.authKind || '').toLowerCase()
+  const access = firstString(obj, 'access_token', 'accessToken')
+  const refresh = firstString(obj, 'refresh_token', 'refreshToken')
+  const sso = firstString(obj, 'sso', 'sso_token', 'ssoToken')
+  if (!(access || refresh || sso)) return false
+  if (type === 'xai' || authKind === 'oauth') return true
+  // CLIProxy/CPA xai-*.json often still carries refresh_token + email/sub without type
+  if ((access || refresh) && (firstString(obj, 'email') || firstString(obj, 'sub'))) return true
+  return false
+}
+
+const convertCpaXaiToDataPayload = (payload: unknown, sourceName = ''): AdminDataPayload => {
+  const obj = asRecord(payload)
+  if (!obj) throw new Error('invalid cpa payload')
+
+  const access = firstString(obj, 'access_token', 'accessToken')
+  const refresh = firstString(obj, 'refresh_token', 'refreshToken')
+  const idToken = firstString(obj, 'id_token', 'idToken')
+  const sso = firstString(obj, 'sso', 'sso_token', 'ssoToken')
+  if (!access && !refresh && !sso) {
+    throw new Error('CPA JSON missing access_token/refresh_token/sso')
+  }
+  if (!refresh && !sso) {
+    throw new Error('CPA JSON missing refresh_token/sso for long-lived OAuth')
+  }
+
+  let email = firstString(obj, 'email')
+  let sub = firstString(obj, 'sub')
+  let clientId = firstString(obj, 'client_id', 'clientId')
+  let teamId = firstString(obj, 'team_id', 'teamId')
+  let scope = firstString(obj, 'scope')
+  let expiresAt = firstString(obj, 'expired', 'expires_at', 'expiresAt')
+  let baseUrl = firstString(obj, 'base_url', 'baseUrl') || 'https://cli-chat-proxy.grok.com/v1'
+
+  for (const token of [idToken, access]) {
+    if (!token) continue
+    const claims = decodeJwtPayload(token)
+    if (!claims) continue
+    if (!email) email = firstString(claims, 'email')
+    if (!sub) sub = firstString(claims, 'sub')
+    if (!clientId) clientId = firstString(claims, 'client_id', 'cid', 'azp')
+    if (!teamId) teamId = firstString(claims, 'team_id', 'https://api.x.ai/jwt/claims/team_id')
+    if (!scope && typeof claims.scope === 'string') scope = String(claims.scope)
+    if (!expiresAt && typeof claims.exp === 'number') {
+      expiresAt = new Date(claims.exp * 1000).toISOString()
+    }
+  }
+
+  if (!clientId) clientId = 'b1a00492-073a-47ea-816f-4c329264a828'
+  if (!email && sourceName) {
+    const m = sourceName.match(/xai-([^/\\]+?)(?:\.json)?$/i)
+    if (m?.[1]) email = m[1]
+  }
+
+  const credentials: Record<string, unknown> = {
+    access_token: access || undefined,
+    refresh_token: refresh || undefined,
+    id_token: idToken || undefined,
+    email: email || undefined,
+    sub: sub || undefined,
+    client_id: clientId || undefined,
+    team_id: teamId || undefined,
+    base_url: baseUrl,
+    scope: scope || undefined,
+    token_type: firstString(obj, 'token_type', 'tokenType') || 'Bearer',
+    expires_at: expiresAt || undefined
+  }
+  if (sso && !refresh) {
+    credentials.sso = sso
+  }
+  // drop undefined
+  Object.keys(credentials).forEach((k) => {
+    if (credentials[k] === undefined || credentials[k] === '') delete credentials[k]
+  })
+
+  const name = email || (sub ? `grok-${sub.slice(0, 10)}` : sourceName || 'grok-cpa')
+  return {
+    type: 'sub2api-data',
+    version: SUPPORTED_DATA_VERSION,
+    exported_at: new Date().toISOString(),
+    proxies: [],
+    accounts: [
+      {
+        name,
+        platform: 'grok',
+        type: 'oauth',
+        credentials,
+        concurrency: 1,
+        priority: 50,
+        auto_pause_on_expired: true
+      }
+    ]
+  } as AdminDataPayload
+}
+
 // 与后端 validateDataHeader 对齐:合并前逐文件校验,避免坏文件混入合并 payload 后
 // 报错无法定位来源,或绕过后端本会对单文件做的 type/version 检查。
+// 额外兼容 CLIProxy/CPA xai-*.json（type=xai auth_kind=oauth）。
 const isValidDataPayload = (payload: unknown): payload is AdminDataPayload => {
+  if (isCpaXaiOAuthPayload(payload)) return true
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
   const candidate = payload as Record<string, unknown>
   if (
@@ -289,7 +417,18 @@ const handleImport = async () => {
         appStore.showError(t('admin.accounts.dataImportInvalidFile', { name: sourceFile.name }))
         return
       }
-      dataPayloads.push(parsed)
+      if (isCpaXaiOAuthPayload(parsed)) {
+        try {
+          dataPayloads.push(convertCpaXaiToDataPayload(parsed, sourceFile.name))
+        } catch (error: any) {
+          appStore.showError(
+            error?.message || t('admin.accounts.dataImportParseFailedFile', { name: sourceFile.name })
+          )
+          return
+        }
+      } else {
+        dataPayloads.push(parsed as AdminDataPayload)
+      }
     }
     const dataPayload = mergeDataPayloads(dataPayloads)
 
@@ -324,3 +463,4 @@ const handleImport = async () => {
   }
 }
 </script>
+
