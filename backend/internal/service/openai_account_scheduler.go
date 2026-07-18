@@ -1619,7 +1619,8 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatible(ctx context.C
 	}
 	// Grok uses the same scheduler path as OpenAI-compatible traffic. Skip accounts
 	// whose latest model-endpoint snapshot is rate-limited / exhausted, otherwise the
-	// candidate TopK is dominated by 429 accounts while healthy ones never get tried.
+	// candidate TopK is dominated by hot 429 accounts and clients see
+	// "exceeded retry limit ... 429".
 	if paused, _ := shouldAutoPauseGrokAccountByQuota(account); paused {
 		return false
 	}
