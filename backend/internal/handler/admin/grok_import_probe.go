@@ -58,6 +58,17 @@ func (s *grokImportProbeScheduler) schedule(prober grokUsageProber, account *ser
 	if account.Platform != service.PlatformGrok || account.Type != service.AccountTypeOAuth {
 		return
 	}
+	// Mass CPA/import can enqueue hundreds of unbound accounts. Active model probes
+	// consume the same xAI request budget as real traffic and amplify 429 storms.
+	// Only probe accounts already attached to a group (or explicitly marked schedulable
+	// with groups). Unbound inventory can still use billing refresh / manual probe.
+	if len(account.GroupIDs) == 0 {
+		slog.Info(
+			"grok_import_active_probe_skipped_unbound",
+			"account_id", account.ID,
+		)
+		return
+	}
 
 	s.mu.Lock()
 	s.queue = append(s.queue, grokImportProbeTask{prober: prober, accountID: account.ID})

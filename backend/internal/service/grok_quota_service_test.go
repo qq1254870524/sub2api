@@ -844,6 +844,31 @@ func TestShouldAutoPauseGrokAccountByQuota(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "fresh status 429 without windows pauses",
+			snapshot: xai.QuotaSnapshot{
+				StatusCode: 429,
+				UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+			},
+			want: true,
+		},
+		{
+			name: "stale status 429 ignored",
+			snapshot: xai.QuotaSnapshot{
+				StatusCode: 429,
+				UpdatedAt:  time.Now().Add(-3 * time.Hour).UTC().Format(time.RFC3339),
+			},
+			want: false,
+		},
+		{
+			name: "status 200 with remaining is not paused",
+			snapshot: xai.QuotaSnapshot{
+				StatusCode: 200,
+				Requests:   &xai.QuotaWindow{Limit: &limit, Remaining: &limit, ResetUnix: &resetFuture},
+				UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+			},
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {

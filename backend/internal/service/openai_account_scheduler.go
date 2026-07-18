@@ -1617,6 +1617,12 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatible(ctx context.C
 	if paused, _ := shouldAutoPauseOpenAIAccountByQuota(ctx, account); paused {
 		return false
 	}
+	// Grok uses the same scheduler path as OpenAI-compatible traffic. Skip accounts
+	// whose latest model-endpoint snapshot is rate-limited / exhausted, otherwise the
+	// candidate TopK is dominated by 429 accounts while healthy ones never get tried.
+	if paused, _ := shouldAutoPauseGrokAccountByQuota(account); paused {
+		return false
+	}
 	// 母账号健康联动：影子账号的凭据来自母账号，母账号不可调度时影子也不应被选中。
 	// Parent-health gate: shadow borrows the parent's credentials; an unschedulable
 	// parent must block the shadow across all scheduler paths.

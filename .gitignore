@@ -143,3 +143,6 @@ docs/*
 frontend/coverage/
 aicodex
 output/
+
+frontend/.pnpm-store/
+
