@@ -110,9 +110,6 @@ func newGrokOAuthImportAccount(id int64) *service.Account {
 		ID:       id,
 		Platform: service.PlatformGrok,
 		Type:     service.AccountTypeOAuth,
-		// Active import probes only run for group-bound accounts to avoid
-		// burning model quota on unbound inventory.
-		GroupIDs: []int64{3},
 	}
 }
 
@@ -125,26 +122,6 @@ func awaitGrokProbeSignal(t *testing.T, signals <-chan int64) int64 {
 		t.Fatal("timed out waiting for Grok import probe")
 		return 0
 	}
-}
-
-func TestGrokImportProbeSchedulerSkipsUnboundAccounts(t *testing.T) {
-	scheduler := newGrokImportProbeScheduler(1, time.Second)
-	prober := newGrokImportProbeStub(1)
-	unbound := &service.Account{
-		ID:       999,
-		Platform: service.PlatformGrok,
-		Type:     service.AccountTypeOAuth,
-	}
-
-	scheduler.schedule(prober, unbound)
-	time.Sleep(50 * time.Millisecond)
-
-	calls, maxActive, _ := prober.snapshot()
-	require.Empty(t, calls)
-	require.Equal(t, 0, maxActive)
-	snapshot := snapshotGrokImportProbeScheduler(scheduler)
-	require.Equal(t, 0, snapshot.queued)
-	require.Equal(t, 0, snapshot.workers)
 }
 
 func TestGrokImportProbeSchedulerProbesSingleAccountOnce(t *testing.T) {

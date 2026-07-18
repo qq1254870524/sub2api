@@ -1,4 +1,11 @@
-﻿# sub2api (qq1254870524 fork)
+# Fork notes (qq1254870524/sub2api)
+
+## 2026-07-19 — v0.1.160-fork1
+- Base: upstream tag `v0.1.160`.
+- Keep: Grok CPA import API + ImportDataModal CPA/xai JSON + i18n.
+- 429: `grokOAuth429MaxAccountSwitches=10`, status_429 auto-pause in scheduler path, grok fallback cooldown 10m.
+
+# sub2api (qq1254870524 fork)
 
 Based on upstream [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api).
 

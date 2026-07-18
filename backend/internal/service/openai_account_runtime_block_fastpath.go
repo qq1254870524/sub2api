@@ -16,10 +16,11 @@ const (
 	openAIOAuth429StormWindow             = 10 * time.Second
 	openAIOAuth429StormThreshold          = 20
 	openAIOAuth429StormMaxAccountSwitches = 1
-	// Grok free/subscription pools often have many accounts briefly 429'd. Allow
-	// more request-local switches than the OpenAI storm path so a single request
-	// can still land on a healthy account without waiting for snapshot sync.
-	grokOAuth429MaxAccountSwitches = 5
+	// Grok free/subscription pools often have many accounts briefly 429'd.
+	// Allow enough request-local switches to align with gateway.max_account_switches
+	// default (10) so one request can land on a healthy account instead of
+	// exhausting after a single follow-up ("exceeded retry limit ... 429").
+	grokOAuth429MaxAccountSwitches = 10
 )
 
 // OpenAIOAuth429FailoverState tracks request-local Grok OAuth 429 failover budget.
@@ -317,8 +318,7 @@ func (s *OpenAIGatewayService) isOpenAIOAuth429Storm() bool {
 func (s *OpenAIGatewayService) ShouldStopOpenAIOAuth429Failover(account *Account, statusCode int, failedSwitches int, state *OpenAIOAuth429FailoverState) bool {
 	if isGrokOAuthAccount(account) {
 		if state == nil {
-			// Preserve a higher threshold for callers that have not adopted the
-			// request-local state contract yet.
+			// Higher threshold for callers that have not adopted request-local state.
 			return statusCode == http.StatusTooManyRequests && failedSwitches >= grokOAuth429MaxAccountSwitches
 		}
 		if statusCode == http.StatusTooManyRequests {

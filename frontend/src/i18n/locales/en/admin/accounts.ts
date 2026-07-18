@@ -1,4 +1,4 @@
-﻿export default {
+export default {
     accounts: {
       title: 'Account Management',
       description: 'Manage AI platform accounts and credentials',
@@ -1326,4 +1326,3 @@
 
     // Scheduled Tests
 }
-

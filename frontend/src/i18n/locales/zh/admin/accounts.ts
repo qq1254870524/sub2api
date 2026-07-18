@@ -1,4 +1,4 @@
-﻿export default {
+export default {
     accounts: {
       title: '账号管理',
       description: '管理 AI 平台账号和 Cookie',
@@ -1340,4 +1340,3 @@
 
     // Scheduled Tests
 }
-
