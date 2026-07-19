@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Admin Accounts API endpoints
  * Handles AI platform account management for administrators
  */
@@ -658,6 +658,53 @@ export async function importData(payload: {
   return data
 }
 
+
+export interface GrokA2GImportItem {
+  index: number
+  name?: string
+  email?: string
+  sso_masked?: string
+  action: 'created' | 'skipped' | 'failed' | string
+  account_id?: number
+  message?: string
+  account?: unknown
+}
+
+export interface GrokA2GImportResult {
+  total: number
+  created: number
+  skipped: number
+  failed: number
+  items?: GrokA2GImportItem[]
+  errors?: Array<{ index?: number; name?: string; message: string }>
+}
+
+export interface GrokA2GImportRequest {
+  content?: string
+  contents?: string[]
+  tokens?: string[]
+  sso_tokens?: string[]
+  name?: string
+  notes?: string | null
+  proxy_id?: number | null
+  group_ids?: number[]
+  credentials?: Record<string, unknown>
+  extra?: Record<string, unknown>
+  concurrency?: number
+  priority?: number
+}
+
+export async function importA2G(
+  payload: GrokA2GImportRequest,
+  options?: { timeout?: number }
+): Promise<GrokA2GImportResult> {
+  const { data } = await apiClient.post<GrokA2GImportResult>(
+    '/admin/accounts/import/a2g',
+    payload,
+    { timeout: options?.timeout }
+  )
+  return data
+}
 export async function importCodexSession(payload: CodexSessionImportRequest): Promise<CodexSessionImportResult> {
   const { data } = await apiClient.post<CodexSessionImportResult>('/admin/accounts/import/codex-session', payload, {
     timeout: 120000 // 120s timeout for large session imports
@@ -919,6 +966,7 @@ export const accountsAPI = {
   syncFromCrs,
   exportData,
   importData,
+  importA2G,
   importCodexSession,
   createOpenAICodexPAT,
   getAntigravityDefaultModelMapping,

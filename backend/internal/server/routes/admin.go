@@ -1,4 +1,4 @@
-// Package routes provides HTTP route registration and handlers.
+﻿// Package routes provides HTTP route registration and handlers.
 package routes
 
 import (
@@ -347,6 +347,7 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/check-mixed-channel", h.Admin.Account.CheckMixedChannel)
 		accounts.POST("/import/codex-session", h.Admin.Account.ImportCodexSession)
 		accounts.POST("/import/grok-cpa", h.Admin.Account.ImportGrokCPA)
+		accounts.POST("/import/a2g", h.Admin.GrokOAuth.ImportA2G)
 		accounts.POST("/sync/crs", h.Admin.Account.SyncFromCRS)
 		accounts.POST("/sync/crs/preview", h.Admin.Account.PreviewFromCRS)
 		accounts.PUT("/:id", h.Admin.Account.Update)

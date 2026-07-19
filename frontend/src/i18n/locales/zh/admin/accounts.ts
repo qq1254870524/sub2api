@@ -1,4 +1,4 @@
-export default {
+﻿export default {
     accounts: {
       title: '账号管理',
       description: '管理 AI 平台账号和 Cookie',
@@ -44,6 +44,22 @@ export default {
       dataImportErrors: '失败详情',
       dataImportSuccess: '导入完成：账号 {account_created}，失败 {account_failed}',
       dataImportCompletedWithErrors: '导入完成但有错误：账号失败 {account_failed}，代理失败 {proxy_failed}',
+      a2gImport: 'A2G导入',
+      a2gImportTitle: '从 Grok2API (A2G) 导入',
+      a2gImportHint: '上传或粘贴 Grok2API 账号池导出（.txt 每行一个 SSO，或 G2A JSON {pool:[tokens]}）。系统会走 SSO→OAuth 创建 Grok 账号。',
+      a2gImportWarning: '重复 SSO 一律跳过，不会覆盖已有账号。导入后凭据中会保留 sso 字段，便于与 G2A 号池双向去重。',
+      a2gImportFile: 'G2A 导出文件',
+      a2gImportPaste: '或粘贴导出内容',
+      a2gImportPastePlaceholder: '每行一个 SSO，或粘贴 Grok2API JSON 导出',
+      a2gImportSelectFile: '请选择文件或粘贴内容',
+      a2gImportButton: '开始 A2G 导入',
+      a2gImporting: 'A2G 导入中...',
+      a2gImportResult: 'A2G 导入结果',
+      a2gImportResultSummary: '共 {total}：创建 {created}，跳过重复 {skipped}，失败 {failed}',
+      a2gImportErrors: '失败详情',
+      a2gImportSuccess: 'A2G 导入完成：创建 {created}，跳过 {skipped}，失败 {failed}',
+      a2gImportCompletedWithErrors: 'A2G 导入完成但有失败：创建 {created}，跳过 {skipped}，失败 {failed}',
+      a2gImportFailed: 'A2G 导入失败',
       syncFromCrsTitle: '从 CRS 同步账号',
       syncFromCrsDesc:
         '将 claude-relay-service（CRS）中的账号同步到当前系统（不会在浏览器侧直接请求 CRS）。',

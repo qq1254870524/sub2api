@@ -1,4 +1,4 @@
-package admin
+﻿package admin
 
 import (
 	"context"
@@ -544,6 +544,9 @@ func normalizeGrokCPAImportEntry(value any) (*grokCPANormalized, error) {
 	if refreshToken != "" {
 		identityKeys = append(identityKeys, "rt:"+refreshToken)
 	}
+	if sso != "" {
+		identityKeys = append(identityKeys, "sso:"+sso)
+	}
 
 	return &grokCPANormalized{
 		Name:         name,
@@ -614,6 +617,9 @@ func grokCPAIdentityKeysFromAccount(account service.Account) []string {
 	}
 	if rt := strings.TrimSpace(account.GetCredential("refresh_token")); rt != "" {
 		keys = append(keys, "rt:"+rt)
+	}
+	if sso := normalizeGrokCPASSO(firstNonEmptyString(account.Credentials, "sso", "sso_token", "ssoToken")); sso != "" {
+		keys = append(keys, "sso:"+sso)
 	}
 	return keys
 }

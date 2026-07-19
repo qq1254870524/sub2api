@@ -1,4 +1,4 @@
-export default {
+﻿export default {
     accounts: {
       title: 'Account Management',
       description: 'Manage AI platform accounts and credentials',
@@ -44,6 +44,22 @@ export default {
       dataImportErrors: 'Error Details',
       dataImportSuccess: 'Import completed: accounts {account_created}, failed {account_failed}',
       dataImportCompletedWithErrors: 'Import completed with errors: account failed {account_failed}, proxy failed {proxy_failed}',
+      a2gImport: 'A2G Import',
+      a2gImportTitle: 'Import from Grok2API (A2G)',
+      a2gImportHint: 'Upload or paste a Grok2API account-pool export (.txt one SSO per line, or G2A JSON {pool:[tokens]}). Tokens are converted SSO→OAuth into Grok accounts.',
+      a2gImportWarning: 'Duplicate SSOs are always skipped and never overwrite existing accounts. Imported credentials keep the sso field for cross-pool dedupe with G2A.',
+      a2gImportFile: 'G2A export file',
+      a2gImportPaste: 'Or paste export content',
+      a2gImportPastePlaceholder: 'One SSO per line, or paste Grok2API JSON export',
+      a2gImportSelectFile: 'Select a file or paste content',
+      a2gImportButton: 'Start A2G Import',
+      a2gImporting: 'Importing A2G...',
+      a2gImportResult: 'A2G Import Result',
+      a2gImportResultSummary: 'Total {total}: created {created}, skipped duplicates {skipped}, failed {failed}',
+      a2gImportErrors: 'Failures',
+      a2gImportSuccess: 'A2G import done: created {created}, skipped {skipped}, failed {failed}',
+      a2gImportCompletedWithErrors: 'A2G import finished with failures: created {created}, skipped {skipped}, failed {failed}',
+      a2gImportFailed: 'A2G import failed',
       syncFromCrsTitle: 'Sync Accounts from CRS',
       syncFromCrsDesc:
         'Sync accounts from claude-relay-service (CRS) into this system (CRS is called server-to-server).',

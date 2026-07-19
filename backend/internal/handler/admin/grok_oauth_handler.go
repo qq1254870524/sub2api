@@ -1,4 +1,4 @@
-package admin
+﻿package admin
 
 import (
 	"context"
@@ -316,6 +316,32 @@ func (h *GrokOAuthHandler) CreateAccountsFromSSO(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+	preSkipped := make([]GrokSSOToOAuthItemResult, 0)
+	if existingSSO, err := h.listExistingGrokSSOSet(ctx); err == nil {
+		filtered := make([]string, 0, len(tokens))
+		for i, token := range tokens {
+			if _, ok := existingSSO[token]; ok {
+				preSkipped = append(preSkipped, GrokSSOToOAuthItemResult{
+					Index: i + 1,
+					Error: "SSO already exists; not overwritten",
+				})
+				continue
+			}
+			existingSSO[token] = struct{}{}
+			filtered = append(filtered, token)
+		}
+		tokens = filtered
+	}
+
+	result := GrokSSOToOAuthResponse{
+		Created: make([]GrokSSOToOAuthItemResult, 0, len(tokens)),
+		Failed:  append([]GrokSSOToOAuthItemResult{}, preSkipped...),
+	}
+	if len(tokens) == 0 {
+		response.Success(c, result)
+		return
+	}
+
 	workerCount := grokSSOImportConcurrency
 	if len(tokens) < workerCount {
 		workerCount = len(tokens)
@@ -338,10 +364,6 @@ func (h *GrokOAuthHandler) CreateAccountsFromSSO(c *gin.Context) {
 	close(jobs)
 	wg.Wait()
 
-	result := GrokSSOToOAuthResponse{
-		Created: make([]GrokSSOToOAuthItemResult, 0, len(tokens)),
-		Failed:  make([]GrokSSOToOAuthItemResult, 0),
-	}
 	for _, item := range items {
 		if item.created {
 			result.Created = append(result.Created, item.item)
@@ -374,6 +396,10 @@ func (h *GrokOAuthHandler) createAccountFromSSOToken(ctx context.Context, req Gr
 	}
 
 	credentials := grokSSOImportCredentials(h.grokOAuthService.BuildAccountCredentials(tokenInfo), req.Credentials)
+	// Persist original SSO for cross-pool (G2A ↔ Sub2API) dedupe; never let OAuth fields overwrite it.
+	if normalized := xai.NormalizeSSOToken(token); normalized != "" {
+		credentials["sso"] = normalized
+	}
 	name := grokSSOImportAccountName(req.Name, tokenInfo, index, total)
 	expiresAt, autoPauseOnExpired := grokSSOImportExpiry(req.ExpiresAt, req.AutoPauseOnExpired, tokenInfo)
 	account, err := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
