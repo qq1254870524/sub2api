@@ -4,9 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -21,12 +27,16 @@ import (
 //   - Grok2API JSON: { "basic": ["token"|{token,tags}], "super": [...], ... }
 //   - JSON array of tokens / objects with token|sso|sso_token
 //   - { "tokens": [...] } / { "content": "..." }
+//
 // Never overwrites existing accounts that already carry the same SSO or email.
 type GrokA2GImportRequest struct {
-	Content            string         `json:"content"`
-	Contents           []string       `json:"contents"`
-	Tokens             []string       `json:"tokens"`
-	SSOTokens          []string       `json:"sso_tokens"`
+	Content   string   `json:"content"`
+	Contents  []string `json:"contents"`
+	Tokens    []string `json:"tokens"`
+	SSOTokens []string `json:"sso_tokens"`
+	// Server-side direct bridge (Sub2 backend pulls G2A; avoids browser CORS / Failed to fetch)
+	G2ABaseURL         string         `json:"g2a_base_url"`
+	G2AAdminKey        string         `json:"g2a_admin_key"`
 	Name               string         `json:"name"`
 	Notes              *string        `json:"notes"`
 	ProxyID            *int64         `json:"proxy_id"`
@@ -39,6 +49,20 @@ type GrokA2GImportRequest struct {
 	RateMultiplier     *float64       `json:"rate_multiplier"`
 	ExpiresAt          *int64         `json:"expires_at"`
 	AutoPauseOnExpired *bool          `json:"auto_pause_on_expired"`
+}
+
+// GrokG2AFetchRequest is a lightweight probe/pull of G2A account pool via Sub2 backend.
+type GrokG2AFetchRequest struct {
+	G2ABaseURL  string `json:"g2a_base_url"`
+	G2AAdminKey string `json:"g2a_admin_key"`
+}
+
+// GrokG2AFetchResult returns SSO tokens pulled from G2A without importing.
+type GrokG2AFetchResult struct {
+	BaseURLUsed string   `json:"base_url_used"`
+	Count       int      `json:"count"`
+	Tokens      []string `json:"tokens"`
+	Tried       []string `json:"tried,omitempty"`
 }
 
 type GrokA2GImportResult struct {
@@ -98,9 +122,28 @@ func (h *GrokOAuthHandler) ImportA2G(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
+
+	// Prefer server-side pull when URL+Admin Key provided (avoids browser CORS / downtime race).
+	if strings.TrimSpace(req.G2ABaseURL) != "" && strings.TrimSpace(req.G2AAdminKey) != "" {
+		pulled, used, tried, err := fetchSSOTokensFromG2A(c.Request.Context(), req.G2ABaseURL, req.G2AAdminKey)
+		if err != nil {
+			response.BadRequest(c, fmt.Sprintf(
+				"从 G2A 服务端拉取失败: %v（已尝试: %s）。Admin Key 必须是 app_key（管理后台登录密钥），不是 api_key。若 G2A 在 Windows 本机而 Sub2 在 Docker，请用 http://172.24.80.1:8010 或 host 可达地址。",
+				err, strings.Join(tried, ", "),
+			))
+			return
+		}
+		if len(pulled) == 0 {
+			response.BadRequest(c, fmt.Sprintf("G2A 号池为空（%s）", used))
+			return
+		}
+		req.Tokens = append(req.Tokens, pulled...)
+		slog.Info("grok_a2g_server_pull", "base_url_used", used, "count", len(pulled), "tried", tried)
+	}
+
 	tokens, parseErrs := parseGrokA2GTokens(req)
 	if len(tokens) == 0 {
-		msg := "请提供 Grok2API SSO（浏览器直连 tokens、txt 每行一个 SSO，或 G2A JSON {pool:[tokens]}）"
+		msg := "请提供 Grok2API SSO（填写 G2A 地址+Admin Key 由服务端拉取、或 txt 每行一个 SSO、或 G2A JSON {pool:[tokens]}）"
 		if len(parseErrs) > 0 {
 			msg = msg + "；" + strings.Join(parseErrs, "; ")
 		}
@@ -330,6 +373,177 @@ func (h *GrokOAuthHandler) ExportG2ASSO(c *gin.Context) {
 		"without_sso", result.WithoutSSO,
 	)
 	response.Success(c, result)
+}
+
+// FetchG2A pulls SSO tokens from Grok2API via Sub2 backend (no import).
+// POST /api/v1/admin/accounts/fetch/g2a
+func (h *GrokOAuthHandler) FetchG2A(c *gin.Context) {
+	var req GrokG2AFetchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.G2ABaseURL) == "" || strings.TrimSpace(req.G2AAdminKey) == "" {
+		response.BadRequest(c, "请填写 g2a_base_url 与 g2a_admin_key（Admin Key = G2A app_key）")
+		return
+	}
+	tokens, used, tried, err := fetchSSOTokensFromG2A(c.Request.Context(), req.G2ABaseURL, req.G2AAdminKey)
+	if err != nil {
+		response.BadRequest(c, fmt.Sprintf(
+			"连接 G2A 失败: %v（已尝试: %s）。确认 G2A 已启动且 Admin Key 为 app_key；Docker 内请用宿主机可达地址如 http://172.24.80.1:8010",
+			err, strings.Join(tried, ", "),
+		))
+		return
+	}
+	response.Success(c, GrokG2AFetchResult{
+		BaseURLUsed: used,
+		Count:       len(tokens),
+		Tokens:      tokens,
+		Tried:       tried,
+	})
+}
+
+func fetchSSOTokensFromG2A(ctx context.Context, baseURL, adminKey string) (tokens []string, used string, tried []string, err error) {
+	key := strings.TrimSpace(adminKey)
+	if key == "" {
+		return nil, "", nil, fmt.Errorf("empty admin key")
+	}
+	candidates := g2aBaseURLCandidates(baseURL)
+	if len(candidates) == 0 {
+		return nil, "", nil, fmt.Errorf("empty g2a_base_url")
+	}
+	client := &http.Client{Timeout: 25 * time.Second}
+	var lastErr error
+	for _, base := range candidates {
+		tried = append(tried, base)
+		endpoint := strings.TrimRight(base, "/") + "/admin/api/tokens"
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if reqErr != nil {
+			lastErr = reqErr
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "Sub2API-G2A-Bridge/1.0")
+		resp, doErr := client.Do(req)
+		if doErr != nil {
+			lastErr = doErr
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			lastErr = fmt.Errorf("%s HTTP %d (Admin Key 错误：请用 app_key，不是 api_key)", base, resp.StatusCode)
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("%s HTTP %d: %s", base, resp.StatusCode, truncateRunes(string(body), 180))
+			continue
+		}
+		parsed, parseErr := extractTokensFromA2GJSON(string(body))
+		if parseErr != nil {
+			lastErr = fmt.Errorf("%s invalid payload: %v", base, parseErr)
+			continue
+		}
+		out := make([]string, 0, len(parsed))
+		seen := make(map[string]struct{}, len(parsed))
+		for _, raw := range parsed {
+			tok := xai.NormalizeSSOToken(raw)
+			if tok == "" {
+				continue
+			}
+			if _, ok := seen[tok]; ok {
+				continue
+			}
+			seen[tok] = struct{}{}
+			out = append(out, tok)
+		}
+		return out, base, tried, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("all candidates failed")
+	}
+	return nil, "", tried, lastErr
+}
+
+func g2aBaseURLCandidates(raw string) []string {
+	base := strings.TrimSpace(raw)
+	if base == "" {
+		return nil
+	}
+	if !strings.Contains(base, "://") {
+		base = "http://" + base
+	}
+	base = strings.TrimRight(base, "/")
+	out := []string{}
+	seen := map[string]struct{}{}
+	add := func(s string) {
+		s = strings.TrimRight(strings.TrimSpace(s), "/")
+		if s == "" {
+			return
+		}
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	add(base)
+
+	u, err := url.Parse(base)
+	if err != nil {
+		return out
+	}
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	altPorts := []string{}
+	if port == "8010" {
+		altPorts = append(altPorts, "8012")
+	} else if port == "8012" {
+		altPorts = append(altPorts, "8010")
+	}
+	host := u.Hostname()
+	rewriteHosts := []string{}
+	if host == "127.0.0.1" || host == "localhost" || host == "0.0.0.0" {
+		if v := strings.TrimSpace(os.Getenv("G2A_HOST_REACHABLE")); v != "" {
+			rewriteHosts = append(rewriteHosts, v)
+		}
+		if peer := strings.TrimSpace(os.Getenv("GATEWAY_PEER_G2A_BASE_URL")); peer != "" {
+			if pu, e := url.Parse(peer); e == nil && pu.Hostname() != "" {
+				rewriteHosts = append(rewriteHosts, pu.Hostname())
+			}
+		}
+		rewriteHosts = append(rewriteHosts, "host.docker.internal", "172.24.80.1")
+	}
+	for _, p := range altPorts {
+		u2 := *u
+		u2.Host = net.JoinHostPort(u.Hostname(), p)
+		add(strings.TrimRight(u2.String(), "/"))
+	}
+	for _, h := range rewriteHosts {
+		u2 := *u
+		u2.Host = net.JoinHostPort(h, port)
+		add(strings.TrimRight(u2.String(), "/"))
+		for _, p := range altPorts {
+			u3 := *u
+			u3.Host = net.JoinHostPort(h, p)
+			add(strings.TrimRight(u3.String(), "/"))
+		}
+	}
+	return out
+}
+
+func truncateRunes(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 func (h *GrokOAuthHandler) listExistingGrokIdentitySets(ctx context.Context) (map[string]struct{}, map[string]struct{}, error) {

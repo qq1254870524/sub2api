@@ -172,12 +172,21 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				if !cls.ModelNotFound {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
+				if tryPeerG2AOnExhausted(c, body, streamStarted, nil) {
+					return
+				}
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 				return
 			} else {
 				if lastFailoverErr != nil {
+					if tryPeerG2AOnExhausted(c, body, streamStarted, lastFailoverErr) {
+						return
+					}
 					h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else {
+					if tryPeerG2AOnExhausted(c, body, streamStarted, nil) {
+						return
+					}
 					h.handleStreamingAwareError(c, http.StatusBadGateway, "api_error", "Upstream request failed", streamStarted)
 				}
 				return
@@ -187,6 +196,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel)
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)
+			}
+			if tryPeerG2AOnExhausted(c, body, streamStarted, nil) {
+				return
 			}
 			h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 			return
@@ -252,6 +264,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						return
 					}
 					if c.Writer.Size() != writerSizeBeforeForward {
+						// stream/body already started; peer cannot take over mid-response
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
 					}
@@ -259,6 +272,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, account.GetMappedModel(reqModel), false, nil)
 					}
 					if !failoverErr.ShouldRetryNextAccount() {
+						if tryPeerG2AOnExhausted(c, body, streamStarted, failoverErr) {
+							return
+						}
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -285,11 +301,17 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
 					if switchCount >= maxAccountSwitches {
+						if tryPeerG2AOnExhausted(c, body, streamStarted, failoverErr) {
+							return
+						}
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
 					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
+						if tryPeerG2AOnExhausted(c, body, streamStarted, failoverErr) {
+							return
+						}
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}

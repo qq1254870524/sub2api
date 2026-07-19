@@ -17,7 +17,7 @@
         {{ t('admin.accounts.a2gImportWarning') }}
       </div>
 
-      <!-- Browser direct bridge to G2A -->
+      <!-- Server-side bridge to G2A (Sub2 backend pulls) -->
       <div class="rounded-xl border border-sky-200 bg-sky-50/60 p-4 dark:border-sky-800 dark:bg-sky-900/20">
         <div class="mb-3 text-sm font-medium text-sky-900 dark:text-sky-200">
           {{ t('admin.accounts.a2gDirectTitle') }}
@@ -274,88 +274,10 @@ const handleClose = () => {
 
 const normalizeBaseUrl = (raw: string) => raw.trim().replace(/\/+$/, '')
 
-const candidateBaseUrls = (raw: string): string[] => {
-  const base = normalizeBaseUrl(raw)
-  if (!base) return []
-  const out: string[] = [base]
-  try {
-    const u = new URL(base)
-    const port = u.port || (u.protocol === 'https:' ? '443' : '80')
-    const alts = port === '8010' ? ['8012'] : port === '8012' ? ['8010'] : []
-    for (const p of alts) {
-      const alt = new URL(base)
-      alt.port = p
-      out.push(alt.toString().replace(/\/+$/, ''))
-    }
-  } catch {
-    /* ignore */
-  }
-  return [...new Set(out)]
-}
-
-const extractTokensFromG2APayload = (data: any): string[] => {
-  const out: string[] = []
-  const seen = new Set<string>()
-  const push = (v: unknown) => {
-    if (typeof v !== 'string') return
-    const token = v.trim()
-    if (!token || seen.has(token)) return
-    seen.add(token)
-    out.push(token)
-  }
-  if (!data) return out
-  if (Array.isArray(data.tokens)) {
-    for (const item of data.tokens) {
-      if (typeof item === 'string') push(item)
-      else if (item && typeof item === 'object') push((item as any).token || (item as any).sso)
-    }
-  }
-  for (const key of ['basic', 'super', 'heavy', 'console']) {
-    const arr = (data as any)[key]
-    if (Array.isArray(arr)) {
-      for (const item of arr) {
-        if (typeof item === 'string') push(item)
-        else if (item && typeof item === 'object') push(item.token || item.sso)
-      }
-    }
-  }
-  if (data.data && typeof data.data === 'object') {
-    for (const token of extractTokensFromG2APayload(data.data)) push(token)
-  }
-  return out
-}
-
-const fetchJsonWithTimeout = async (url: string, key: string, ms = 20000): Promise<any> => {
-  const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), ms)
-  try {
-    const resp = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${key}`,
-        Accept: 'application/json'
-      },
-      signal: controller.signal
-    })
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => '')
-      throw new Error(
-        t('admin.accounts.a2gFetchFailedDetail', {
-          status: resp.status,
-          detail: text.slice(0, 200) || resp.statusText
-        })
-      )
-    }
-    return await resp.json()
-  } finally {
-    window.clearTimeout(timer)
-  }
-}
-
 const handleFetchFromG2A = async () => {
   const key = g2aAdminKey.value.trim()
-  const bases = candidateBaseUrls(g2aBaseUrl.value)
-  if (!bases.length || !key) {
+  const base = normalizeBaseUrl(g2aBaseUrl.value)
+  if (!base || !key) {
     const msg = t('admin.accounts.a2gMissingFields')
     setStatus(msg, 'error')
     appStore.showError(msg)
@@ -364,43 +286,45 @@ const handleFetchFromG2A = async () => {
   fetching.value = true
   result.value = null
   setStatus(t('admin.accounts.a2gFetching'), 'info')
-  const errors: string[] = []
   try {
-    for (const base of bases) {
+    // Server-side pull via Sub2 backend — no browser CORS / Failed to fetch
+    const data = await adminAPI.accounts.fetchG2A(
+      { g2a_base_url: base, g2a_admin_key: key },
+      { timeout: 60000 }
+    )
+    const tokens = Array.isArray(data?.tokens) ? data.tokens.filter((x: string) => typeof x === 'string' && x.trim()) : []
+    if (!tokens.length) {
+      const msg = t('admin.accounts.a2gFetchEmpty')
+      setStatus(msg, 'error')
+      appStore.showError(msg)
+      fetchedTokens.value = []
+      return
+    }
+    fetchedTokens.value = tokens
+    if (data.base_url_used) {
+      g2aBaseUrl.value = data.base_url_used
       try {
-        const data = await fetchJsonWithTimeout(`${base}/admin/api/tokens`, key, 20000)
-        const tokens = extractTokensFromG2APayload(data)
-        if (!tokens.length) {
-          errors.push(`${base}: ${t('admin.accounts.a2gFetchEmpty')}`)
-          continue
-        }
-        fetchedTokens.value = tokens
-        g2aBaseUrl.value = base
-        try {
-          localStorage.setItem(STORAGE_URL_KEY, base)
-        } catch {
-          /* ignore */
-        }
-        const ok = t('admin.accounts.a2gFetchedCount', { count: tokens.length })
-        setStatus(`${ok}\n${base}`, 'success')
-        appStore.showSuccess(ok)
-        return
-      } catch (error: any) {
-        const msg =
-          error?.name === 'AbortError'
-            ? t('admin.accounts.a2gFetchTimeout')
-            : error?.message || t('admin.accounts.a2gFetchFailed')
-        errors.push(`${base}: ${msg}`)
+        localStorage.setItem(STORAGE_URL_KEY, data.base_url_used)
+      } catch {
+        /* ignore */
+      }
+    } else {
+      try {
+        localStorage.setItem(STORAGE_URL_KEY, base)
+      } catch {
+        /* ignore */
       }
     }
+    const ok = t('admin.accounts.a2gFetchedCount', { count: tokens.length })
+    const used = data.base_url_used || base
+    setStatus(`${ok}\n${used}`, 'success')
+    appStore.showSuccess(ok)
+  } catch (error: any) {
     fetchedTokens.value = []
-    const joined = errors.join('\n') || t('admin.accounts.a2gFetchFailed')
-    const hint = /Failed to fetch|NetworkError|CORS|Load failed|AbortError|timeout|超时/i.test(joined)
-      ? `\n${t('admin.accounts.a2gFetchCorsHint')}`
-      : ''
-    const finalMsg = `${joined}${hint}\n${t('admin.accounts.a2gKeyHint')}`
+    const msg = error?.message || t('admin.accounts.a2gFetchFailed')
+    const finalMsg = `${msg}\n${t('admin.accounts.a2gKeyHint')}`
     setStatus(finalMsg, 'error')
-    appStore.showError(finalMsg.slice(0, 300))
+    appStore.showError(finalMsg.slice(0, 400))
   } finally {
     fetching.value = false
   }
@@ -411,9 +335,42 @@ const handleImport = async () => {
   const content = (fileContent.value || pasteContent.value || '').trim()
   if (!tokens.length && !content) {
     if (g2aBaseUrl.value.trim() && g2aAdminKey.value.trim()) {
-      await handleFetchFromG2A()
-      if (!fetchedTokens.value.length) return
-      return handleImport()
+      // One-shot server-side import (no browser CORS)
+      importing.value = true
+      result.value = null
+      setStatus(t('admin.accounts.a2gImporting'), 'info')
+      try {
+        const res = await adminAPI.accounts.importA2G(
+          {
+            g2a_base_url: normalizeBaseUrl(g2aBaseUrl.value),
+            g2a_admin_key: g2aAdminKey.value.trim()
+          },
+          { timeout: getGrokSSOImportTimeout(300) }
+        )
+        result.value = res
+        const msgParams = {
+          created: res.created,
+          skipped: res.skipped,
+          failed: res.failed
+        }
+        if (res.failed > 0) {
+          const msg = t('admin.accounts.a2gImportCompletedWithErrors', msgParams)
+          setStatus(msg, 'error')
+          appStore.showError(msg)
+        } else {
+          const msg = t('admin.accounts.a2gImportSuccess', msgParams)
+          setStatus(msg, 'success')
+          appStore.showSuccess(msg)
+          if (res.created > 0) emit('imported')
+        }
+      } catch (error: any) {
+        const msg = error?.message || t('admin.accounts.a2gImportFailed')
+        setStatus(msg, 'error')
+        appStore.showError(msg)
+      } finally {
+        importing.value = false
+      }
+      return
     }
     const msg = t('admin.accounts.a2gImportSelectFile')
     setStatus(msg, 'error')
@@ -429,9 +386,21 @@ const handleImport = async () => {
       1,
       tokens.length || content.split(/\r?\n/).filter((l) => l.trim()).length
     )
-    const payload: { tokens?: string[]; content?: string } = {}
+    const payload: {
+      tokens?: string[]
+      content?: string
+      g2a_base_url?: string
+      g2a_admin_key?: string
+    } = {}
     if (tokens.length) payload.tokens = tokens
     if (content) payload.content = content
+    // Also send bridge fields so backend can re-pull if needed
+    const bridgeUrl = normalizeBaseUrl(g2aBaseUrl.value)
+    const bridgeKey = g2aAdminKey.value.trim()
+    if (bridgeUrl && bridgeKey && !tokens.length && !content) {
+      payload.g2a_base_url = bridgeUrl
+      payload.g2a_admin_key = bridgeKey
+    }
     const res = await adminAPI.accounts.importA2G(payload, {
       timeout: getGrokSSOImportTimeout(roughCount)
     })

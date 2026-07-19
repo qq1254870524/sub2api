@@ -782,6 +782,9 @@ export interface GrokA2GImportRequest {
   contents?: string[]
   tokens?: string[]
   sso_tokens?: string[]
+  /** Server-side pull: Sub2 backend fetches G2A /admin/api/tokens (avoids browser CORS) */
+  g2a_base_url?: string
+  g2a_admin_key?: string
   name?: string
   notes?: string | null
   proxy_id?: number | null
@@ -790,6 +793,30 @@ export interface GrokA2GImportRequest {
   extra?: Record<string, unknown>
   concurrency?: number
   priority?: number
+}
+
+export interface GrokG2AFetchRequest {
+  g2a_base_url: string
+  g2a_admin_key: string
+}
+
+export interface GrokG2AFetchResult {
+  base_url_used: string
+  count: number
+  tokens: string[]
+  tried?: string[]
+}
+
+export async function fetchG2A(
+  payload: GrokG2AFetchRequest,
+  options?: { timeout?: number }
+): Promise<GrokG2AFetchResult> {
+  const { data } = await apiClient.post<GrokG2AFetchResult>(
+    '/admin/accounts/fetch/g2a',
+    payload,
+    { timeout: options?.timeout ?? 60000 }
+  )
+  return data
 }
 
 export async function importA2G(
@@ -1066,6 +1093,7 @@ export const accountsAPI = {
   exportData,
   importData,
   importA2G,
+  fetchG2A,
   importCodexSession,
   createOpenAICodexPAT,
   getAntigravityDefaultModelMapping,

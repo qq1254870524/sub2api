@@ -177,6 +177,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				if !cls.ModelNotFound {
 					message = "No available accounts: " + err.Error()
 				}
+				if tryPeerG2AOnExhausted(c, body, streamStarted, nil) {
+					return
+				}
 				h.chatCompletionsErrorResponse(c, cls.Status, cls.ErrType, message)
 				return
 			}
@@ -189,8 +192,14 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				return
 			default:
 				if fs.LastFailoverErr != nil {
+					if tryPeerG2AOnExhausted(c, body, streamStarted, fs.LastFailoverErr) {
+						return
+					}
 					h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
 				} else {
+					if tryPeerG2AOnExhausted(c, body, streamStarted, nil) {
+						return
+					}
 					h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "server_error", "All available accounts exhausted")
 				}
 				return
@@ -204,6 +213,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		if !selection.Acquired {
 			if selection.WaitPlan == nil {
 				markOpsRoutingCapacityLimited(c)
+				if tryPeerG2AOnExhausted(c, body, streamStarted, nil) {
+					return
+				}
 				h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
 				return
 			}
@@ -267,6 +279,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				case FailoverContinue:
 					continue
 				case FailoverExhausted:
+					if tryPeerG2AOnExhausted(c, body, streamStarted, fs.LastFailoverErr) {
+						return
+					}
 					h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
 					return
 				case FailoverCanceled:
