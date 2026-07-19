@@ -348,6 +348,7 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/import/codex-session", h.Admin.Account.ImportCodexSession)
 		accounts.POST("/import/grok-cpa", h.Admin.Account.ImportGrokCPA)
 		accounts.POST("/import/a2g", h.Admin.GrokOAuth.ImportA2G)
+		accounts.GET("/export/g2a-sso", h.Admin.GrokOAuth.ExportG2ASSO)
 		accounts.POST("/sync/crs", h.Admin.Account.SyncFromCRS)
 		accounts.POST("/sync/crs/preview", h.Admin.Account.PreviewFromCRS)
 		accounts.PUT("/:id", h.Admin.Account.Update)

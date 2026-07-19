@@ -1,4 +1,4 @@
-﻿package admin
+package admin
 
 import (
 	"context"
@@ -21,7 +21,7 @@ import (
 //   - Grok2API JSON: { "basic": ["token"|{token,tags}], "super": [...], ... }
 //   - JSON array of tokens / objects with token|sso|sso_token
 //   - { "tokens": [...] } / { "content": "..." }
-// Never overwrites existing accounts that already carry the same SSO.
+// Never overwrites existing accounts that already carry the same SSO or email.
 type GrokA2GImportRequest struct {
 	Content            string         `json:"content"`
 	Contents           []string       `json:"contents"`
@@ -67,6 +67,29 @@ type GrokA2GImportMessage struct {
 	Message string `json:"message"`
 }
 
+// GrokG2ASSOExportItem is one Grok account row exposed for G2A reverse import.
+type GrokG2ASSOExportItem struct {
+	AccountID int64  `json:"account_id"`
+	Name      string `json:"name,omitempty"`
+	Email     string `json:"email,omitempty"`
+	SSO       string `json:"sso,omitempty"`
+	SSOMasked string `json:"sso_masked,omitempty"`
+	HasSSO    bool   `json:"has_sso"`
+	Status    string `json:"status,omitempty"`
+}
+
+// GrokG2ASSOExportResult is a lightweight SSO export for Grok2API bridge import.
+// Only admin auth is required (no step-up). Sensitive values are returned because
+// the caller is already an authenticated admin performing pool bridging.
+type GrokG2ASSOExportResult struct {
+	Platform   string                 `json:"platform"`
+	Total      int                    `json:"total"`
+	WithSSO    int                    `json:"with_sso"`
+	WithoutSSO int                    `json:"without_sso"`
+	Tokens     []string               `json:"tokens"`
+	Items      []GrokG2ASSOExportItem `json:"items,omitempty"`
+}
+
 // ImportA2G imports Grok2API pool SSO tokens into Sub2API Grok OAuth accounts.
 // POST /api/v1/admin/accounts/import/a2g
 func (h *GrokOAuthHandler) ImportA2G(c *gin.Context) {
@@ -77,7 +100,7 @@ func (h *GrokOAuthHandler) ImportA2G(c *gin.Context) {
 	}
 	tokens, parseErrs := parseGrokA2GTokens(req)
 	if len(tokens) == 0 {
-		msg := "请提供 Grok2API 导出内容（txt 每行一个 SSO，或 G2A JSON {pool:[tokens]}）"
+		msg := "请提供 Grok2API SSO（浏览器直连 tokens、txt 每行一个 SSO，或 G2A JSON {pool:[tokens]}）"
 		if len(parseErrs) > 0 {
 			msg = msg + "；" + strings.Join(parseErrs, "; ")
 		}
@@ -86,7 +109,7 @@ func (h *GrokOAuthHandler) ImportA2G(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	existingSSO, err := h.listExistingGrokSSOSet(ctx)
+	existingSSO, _, err := h.listExistingGrokIdentitySets(ctx)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -171,7 +194,19 @@ func (h *GrokOAuthHandler) ImportA2G(c *gin.Context) {
 		// was skipped earlier?
 		if wi, ok := importIndexByToken[token]; ok {
 			wr := items[wi]
-			if wr.created {
+			if wr.skipped {
+				result.Skipped++
+				result.Items = append(result.Items, GrokA2GImportItem{
+					Index:     i + 1,
+					Name:      wr.item.Name,
+					Email:     wr.item.Email,
+					SSOMasked: masked,
+					Action:    "skipped",
+					Message:   firstNonEmptyA2G(wr.item.Error, "email already exists in Sub2API; not overwritten"),
+					AccountID: accountIDFromDTO(wr.item.Account),
+					Account:   wr.item.Account,
+				})
+			} else if wr.created {
 				result.Created++
 				item := GrokA2GImportItem{
 					Index:     i + 1,
@@ -226,18 +261,61 @@ func (h *GrokOAuthHandler) ImportA2G(c *gin.Context) {
 	response.Success(c, result)
 }
 
-func (h *GrokOAuthHandler) listExistingGrokSSOSet(ctx context.Context) (map[string]struct{}, error) {
-	out := make(map[string]struct{})
+// ExportG2ASSO exports Grok account SSO tokens for Grok2API reverse import.
+// GET /api/v1/admin/accounts/export/g2a-sso
+func (h *GrokOAuthHandler) ExportG2ASSO(c *gin.Context) {
+	ctx := c.Request.Context()
 	page := 1
 	pageSize := dataPageCap
+	result := GrokG2ASSOExportResult{
+		Platform: service.PlatformGrok,
+		Tokens:   make([]string, 0, 64),
+		Items:    make([]GrokG2ASSOExportItem, 0, 64),
+	}
+	seenSSO := make(map[string]struct{})
+
 	for {
 		items, total, err := h.adminService.ListAccounts(ctx, page, pageSize, service.PlatformGrok, "", "", "", 0, "", "created_at", "desc")
 		if err != nil {
-			return nil, err
+			response.ErrorFrom(c, err)
+			return
 		}
 		for i := range items {
-			for _, sso := range extractAccountSSOTokens(items[i]) {
-				out[sso] = struct{}{}
+			acc := items[i]
+			email := firstNonEmptyA2G(
+				normalizeGrokEmail(acc.GetCredential("email")),
+				normalizeGrokEmail(acc.GetCredential("user_email")),
+			)
+			ssos := extractAccountSSOTokens(acc)
+			if len(ssos) == 0 {
+				result.WithoutSSO++
+				result.Items = append(result.Items, GrokG2ASSOExportItem{
+					AccountID: acc.ID,
+					Name:      acc.Name,
+					Email:     email,
+					HasSSO:    false,
+					Status:    acc.Status,
+				})
+				result.Total++
+				continue
+			}
+			for _, sso := range ssos {
+				if _, ok := seenSSO[sso]; ok {
+					continue
+				}
+				seenSSO[sso] = struct{}{}
+				result.WithSSO++
+				result.Total++
+				result.Tokens = append(result.Tokens, sso)
+				result.Items = append(result.Items, GrokG2ASSOExportItem{
+					AccountID: acc.ID,
+					Name:      acc.Name,
+					Email:     email,
+					SSO:       sso,
+					SSOMasked: maskSSOToken(sso),
+					HasSSO:    true,
+					Status:    acc.Status,
+				})
 			}
 		}
 		if len(items) == 0 || page*pageSize >= int(total) {
@@ -245,7 +323,44 @@ func (h *GrokOAuthHandler) listExistingGrokSSOSet(ctx context.Context) (map[stri
 		}
 		page++
 	}
-	return out, nil
+
+	slog.Info("grok_g2a_sso_export",
+		"total", result.Total,
+		"with_sso", result.WithSSO,
+		"without_sso", result.WithoutSSO,
+	)
+	response.Success(c, result)
+}
+
+func (h *GrokOAuthHandler) listExistingGrokIdentitySets(ctx context.Context) (map[string]struct{}, map[string]struct{}, error) {
+	ssoSet := make(map[string]struct{})
+	emailSet := make(map[string]struct{})
+	page := 1
+	pageSize := dataPageCap
+	for {
+		items, total, err := h.adminService.ListAccounts(ctx, page, pageSize, service.PlatformGrok, "", "", "", 0, "", "created_at", "desc")
+		if err != nil {
+			return nil, nil, err
+		}
+		for i := range items {
+			for _, sso := range extractAccountSSOTokens(items[i]) {
+				ssoSet[sso] = struct{}{}
+			}
+			for _, email := range extractAccountEmails(items[i]) {
+				emailSet[email] = struct{}{}
+			}
+		}
+		if len(items) == 0 || page*pageSize >= int(total) {
+			break
+		}
+		page++
+	}
+	return ssoSet, emailSet, nil
+}
+
+func (h *GrokOAuthHandler) listExistingGrokSSOSet(ctx context.Context) (map[string]struct{}, error) {
+	sso, _, err := h.listExistingGrokIdentitySets(ctx)
+	return sso, err
 }
 
 func extractAccountSSOTokens(account service.Account) []string {
@@ -266,6 +381,32 @@ func extractAccountSSOTokens(account service.Account) []string {
 		}
 		seen[token] = struct{}{}
 		result = append(result, token)
+	}
+	return result
+}
+
+func extractAccountEmails(account service.Account) []string {
+	candidates := []string{
+		account.GetCredential("email"),
+		account.GetCredential("user_email"),
+		account.GetCredential("userEmail"),
+	}
+	// Some historical rows only put email in the account name like "user@x.com".
+	if strings.Contains(account.Name, "@") {
+		candidates = append(candidates, account.Name)
+	}
+	result := make([]string, 0, 1)
+	seen := make(map[string]struct{})
+	for _, raw := range candidates {
+		email := normalizeGrokEmail(raw)
+		if email == "" {
+			continue
+		}
+		if _, ok := seen[email]; ok {
+			continue
+		}
+		seen[email] = struct{}{}
+		result = append(result, email)
 	}
 	return result
 }
@@ -416,6 +557,30 @@ func maskSSOToken(token string) string {
 	return token[:8] + "..." + token[len(token)-8:]
 }
 
+func normalizeGrokEmail(raw string) string {
+	email := strings.ToLower(strings.TrimSpace(raw))
+	if email == "" || !strings.Contains(email, "@") {
+		return ""
+	}
+	return email
+}
+
+func firstNonEmptyA2G(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func accountIDFromDTO(account *dto.Account) int64 {
+	if account == nil {
+		return 0
+	}
+	return account.ID
+}
+
 func (h *GrokOAuthHandler) findGrokAccountBySSO(ctx context.Context, sso string) (*service.Account, error) {
 	sso = xai.NormalizeSSOToken(sso)
 	if sso == "" {
@@ -431,6 +596,34 @@ func (h *GrokOAuthHandler) findGrokAccountBySSO(ctx context.Context, sso string)
 		for i := range items {
 			for _, existing := range extractAccountSSOTokens(items[i]) {
 				if existing == sso {
+					acc := items[i]
+					return &acc, nil
+				}
+			}
+		}
+		if len(items) == 0 || page*pageSize >= int(total) {
+			break
+		}
+		page++
+	}
+	return nil, nil
+}
+
+func (h *GrokOAuthHandler) findGrokAccountByEmail(ctx context.Context, email string) (*service.Account, error) {
+	email = normalizeGrokEmail(email)
+	if email == "" {
+		return nil, nil
+	}
+	page := 1
+	pageSize := dataPageCap
+	for {
+		items, total, err := h.adminService.ListAccounts(ctx, page, pageSize, service.PlatformGrok, "", "", "", 0, "", "created_at", "desc")
+		if err != nil {
+			return nil, err
+		}
+		for i := range items {
+			for _, existing := range extractAccountEmails(items[i]) {
+				if existing == email {
 					acc := items[i]
 					return &acc, nil
 				}

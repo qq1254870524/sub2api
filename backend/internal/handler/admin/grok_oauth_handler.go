@@ -300,6 +300,7 @@ type grokSSOImportJob struct {
 
 type grokSSOImportWorkerResult struct {
 	created bool
+	skipped bool
 	item    GrokSSOToOAuthItemResult
 }
 
@@ -367,6 +368,9 @@ func (h *GrokOAuthHandler) CreateAccountsFromSSO(c *gin.Context) {
 	for _, item := range items {
 		if item.created {
 			result.Created = append(result.Created, item.item)
+		} else if item.skipped {
+			// Treat identity-level skip as non-fatal (already present).
+			result.Failed = append(result.Failed, item.item)
 		} else {
 			result.Failed = append(result.Failed, item.item)
 		}
@@ -393,6 +397,22 @@ func (h *GrokOAuthHandler) createAccountFromSSOToken(ctx context.Context, req Gr
 	tokenInfo, err := h.grokOAuthService.ConvertFromSSO(ctx, token, req.ProxyID)
 	if err != nil {
 		return grokSSOImportWorkerResult{item: GrokSSOToOAuthItemResult{Index: index, Error: grokSSOImportErrorMessage(err)}}
+	}
+
+	// Email-level dedupe for historical OAuth rows that lack stored SSO.
+	if email := normalizeGrokEmail(tokenInfo.Email); email != "" {
+		if existing, findErr := h.findGrokAccountByEmail(ctx, email); findErr == nil && existing != nil {
+			return grokSSOImportWorkerResult{
+				skipped: true,
+				item: GrokSSOToOAuthItemResult{
+					Index:   index,
+					Name:    existing.Name,
+					Email:   email,
+					Account: dto.AccountFromService(existing),
+					Error:   "email already exists in Sub2API; not overwritten",
+				},
+			}
+		}
 	}
 
 	credentials := grokSSOImportCredentials(h.grokOAuthService.BuildAccountCredentials(tokenInfo), req.Credentials)
