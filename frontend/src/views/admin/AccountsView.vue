@@ -182,6 +182,7 @@
           :selected-ids="selIds"
           @delete="handleBulkDelete"
           @reset-status="handleBulkResetStatus"
+          @test-connection="handleBulkTestConnection"
           @refresh-token="handleBulkRefreshToken"
           @probe-upstream-billing="handleBulkProbeUpstreamBilling"
           @edit-selected="openBulkEditSelected"
@@ -437,7 +438,7 @@
     <CreateAccountModal :show="showCreate" :proxies="proxies" :groups="groups" @close="showCreate = false" @created="reload" />
     <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :groups="groups" @close="showEdit = false" @updated="handleAccountUpdated" />
     <ReAuthAccountModal :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
-    <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
+    <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" @tested="handleAccountTested" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
     <AccountActionMenu :show="menu.show" :account="menu.acc" :position="menu.pos" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" />
@@ -502,6 +503,7 @@ import ScheduledTestsPanel from '@/components/admin/account/ScheduledTestsPanel.
 import type { SelectOption } from '@/components/common/Select.vue'
 import AccountStatusIndicator from '@/components/account/AccountStatusIndicator.vue'
 import AccountUsageCell from '@/components/account/AccountUsageCell.vue'
+import { invalidateAccountUsageCache } from '@/utils/accountUsageCache'
 import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vue'
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
@@ -1473,7 +1475,10 @@ const handleBulkDelete = async () => { if(!confirm(t('common.confirm'))) return;
 const handleBulkResetStatus = async () => {
   if (!confirm(t('common.confirm'))) return
   try {
-    const result = await adminAPI.accounts.batchClearError(selIds.value)
+    const ids = [...selIds.value]
+    const result = await adminAPI.accounts.batchClearError(ids)
+    invalidateAccountUsageCache(ids)
+    usageManualRefreshToken.value += 1
     if (result.failed > 0) {
       appStore.showError(t('admin.accounts.bulkActions.partialSuccess', { success: result.success, failed: result.failed }))
     } else {
@@ -1484,6 +1489,71 @@ const handleBulkResetStatus = async () => {
   } catch (error) {
     console.error('Failed to bulk reset status:', error)
     appStore.showError(String(error))
+  }
+}
+
+const handleBulkTestConnection = async () => {
+  const ids = [...selIds.value]
+  if (ids.length === 0) return
+  if (!confirm(t('common.confirm'))) return
+
+  appStore.showSuccess(t('admin.accounts.bulkActions.testConnectionRunning'))
+  const concurrency = 3
+  let cursor = 0
+  let success = 0
+  let failed = 0
+  const successIds: number[] = []
+
+  const worker = async () => {
+    while (true) {
+      const current = cursor++
+      if (current >= ids.length) return
+      const accountId = ids[current]
+      try {
+        const result = await adminAPI.accounts.testAccountStream(accountId)
+        if (result.success) {
+          success += 1
+          successIds.push(accountId)
+        } else {
+          failed += 1
+        }
+      } catch (error) {
+        console.error('Bulk connection test failed for account', accountId, error)
+        failed += 1
+      }
+    }
+  }
+
+  try {
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, ids.length) }, () => worker())
+    )
+    invalidateAccountUsageCache(ids)
+    usageManualRefreshToken.value += 1
+    if (failed > 0) {
+      appStore.showError(
+        t('admin.accounts.bulkActions.testConnectionPartial', { success, failed })
+      )
+    } else {
+      appStore.showSuccess(
+        t('admin.accounts.bulkActions.testConnectionSuccess', { count: success })
+      )
+      clearSelection()
+    }
+    reload()
+  } catch (error) {
+    console.error('Failed to bulk test connections:', error)
+    appStore.showError(String(error))
+  }
+}
+
+const handleAccountTested = (payload: { accountId: number; success: boolean }) => {
+  if (!payload?.accountId) return
+  // Always drop sticky frontend usage badges after a connection test.
+  invalidateAccountUsageCache(payload.accountId)
+  usageManualRefreshToken.value += 1
+  if (payload.success) {
+    reload()
   }
 }
 const handleBulkRefreshToken = async () => {
@@ -1917,6 +1987,8 @@ const handleRecoverState = async (a: Account) => {
   try {
     const updated = await adminAPI.accounts.recoverState(a.id)
     patchAccountInList(updated)
+    invalidateAccountUsageCache(a.id)
+    usageManualRefreshToken.value += 1
     enterAutoRefreshSilentWindow()
     appStore.showSuccess(t('admin.accounts.recoverStateSuccess'))
   } catch (error: any) {

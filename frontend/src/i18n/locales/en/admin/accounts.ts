@@ -1,4 +1,4 @@
-﻿export default {
+export default {
     accounts: {
       title: 'Account Management',
       description: 'Manage AI platform accounts and credentials',
@@ -379,9 +379,13 @@
         enableScheduling: 'Enable Scheduling',
         disableScheduling: 'Disable Scheduling',
         resetStatus: 'Reset Status',
+        testConnection: 'Test Connection',
         refreshToken: 'Refresh Token',
         probeUpstreamBilling: 'Probe Upstream Rate',
         resetStatusSuccess: 'Successfully reset {count} account(s) status',
+        testConnectionSuccess: 'Successfully tested {count} account(s) connection',
+        testConnectionPartial: 'Connection test partially completed: {success} succeeded, {failed} failed',
+        testConnectionRunning: 'Testing connections…',
         refreshTokenSuccess: 'Successfully refreshed {count} account(s) token',
         partialSuccess: 'Partially completed: {success} succeeded, {failed} failed'
       },

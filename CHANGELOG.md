@@ -1,5 +1,12 @@
 # Changelog (fork qq1254870524/sub2api)
 
+## 2026-07-19 — batch-test-forbidden-fix
+
+详见 [CHANGELOG_BATCH_TEST.md](./CHANGELOG_BATCH_TEST.md)。
+
+- 批量测试连接（SSE，并发 3）
+- 修复测试/恢复成功后 UI 仍显示 forbidden（前后端 usage 缓存失效）
+
 ## stable-2026-07-19-sub2api-v0.1.161-fork2 (2026-07-19)
 
 ### Highlights

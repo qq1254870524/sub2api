@@ -1,9 +1,10 @@
-﻿/**
+/**
  * Admin Accounts API endpoints
  * Handles AI platform account management for administrators
  */
 
-import { apiClient } from '../client'
+import { apiClient, buildApiUrl } from '../client'
+import { ADMIN_UI_REQUEST_HEADER } from '../adminUIRequest'
 import type {
   Account,
   CreateAccountRequest,
@@ -241,6 +242,103 @@ export async function testAccount(id: number): Promise<{
     latency_ms?: number
   }>(`/admin/accounts/${id}/test`)
   return data
+}
+
+export interface AccountTestStreamResult {
+  success: boolean
+  message: string
+}
+
+/**
+ * Test account connectivity via SSE stream (same as AccountTestModal).
+ * Empty model_id lets the backend pick platform default test models.
+ * Waits until the HTTP stream fully ends so server-side recover/invalidate has run.
+ */
+export async function testAccountStream(
+  id: number,
+  options?: {
+    modelId?: string
+    prompt?: string
+    mode?: 'default' | 'compact'
+    signal?: AbortSignal
+  }
+): Promise<AccountTestStreamResult> {
+  const url = buildApiUrl(`/admin/accounts/${id}/test`)
+  const body: Record<string, string> = {
+    model_id: options?.modelId || '',
+    prompt: options?.prompt || ''
+  }
+  if (options?.mode) {
+    body.mode = options.mode
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem('auth_token') || ''}`,
+      'Content-Type': 'application/json',
+      [ADMIN_UI_REQUEST_HEADER]: '1'
+    },
+    body: JSON.stringify(body),
+    signal: options?.signal
+  })
+
+  if (!response.ok) {
+    return { success: false, message: `HTTP ${response.status}` }
+  }
+
+  const reader = response.body?.getReader()
+  if (!reader) {
+    return { success: false, message: 'No response body' }
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let success = false
+  let lastError = ''
+  let sawComplete = false
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      const jsonStr = line.slice(6).trim()
+      if (!jsonStr) continue
+      try {
+        const event = JSON.parse(jsonStr) as {
+          type?: string
+          success?: boolean
+          error?: string
+        }
+        if (event.type === 'test_complete') {
+          sawComplete = true
+          success = !!event.success
+          if (!success) {
+            lastError = event.error || 'Test failed'
+          }
+        } else if (event.type === 'error') {
+          success = false
+          lastError = event.error || 'Unknown error'
+        }
+      } catch {
+        // ignore malformed SSE chunks
+      }
+    }
+  }
+
+  if (success) {
+    return { success: true, message: 'ok' }
+  }
+  return {
+    success: false,
+    message: lastError || (sawComplete ? 'Test failed' : 'No test result')
+  }
 }
 
 /**
@@ -940,6 +1038,7 @@ export const accountsAPI = {
   delete: deleteAccount,
   toggleStatus,
   testAccount,
+  testAccountStream,
   refreshCredentials,
   applyOAuthCredentials,
   getStats,

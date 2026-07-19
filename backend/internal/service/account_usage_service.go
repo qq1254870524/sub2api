@@ -132,6 +132,44 @@ func NewUsageCache() *UsageCache {
 	return &UsageCache{}
 }
 
+// InvalidateAccountUsageCache drops in-memory usage/probe caches for one account so
+// a successful connection test or error recovery does not keep showing stale forbidden.
+func (s *AccountUsageService) InvalidateAccountUsageCache(accountID int64) {
+	if s == nil || s.cache == nil || accountID <= 0 {
+		return
+	}
+	s.cache.apiCache.Delete(accountID)
+	s.cache.windowStatsCache.Delete(accountID)
+	s.cache.antigravityCache.Delete(accountID)
+	s.cache.openAIProbeCache.Delete(accountID)
+	s.cache.grokProbeCache.Delete(accountID)
+}
+
+// InvalidateAccountUsageCaches drops usage caches for many accounts.
+func (s *AccountUsageService) InvalidateAccountUsageCaches(accountIDs []int64) {
+	for _, id := range accountIDs {
+		s.InvalidateAccountUsageCache(id)
+	}
+}
+
+// usageHealthyForErrorClear reports whether a usage payload proves the account is
+// healthy enough to clear sticky StatusError / forbidden UI badges.
+func usageHealthyForErrorClear(usage *UsageInfo) bool {
+	if usage == nil {
+		return false
+	}
+	if usage.IsForbidden || usage.IsBanned || usage.NeedsVerify || usage.NeedsReauth {
+		return false
+	}
+	if usage.ErrorCode == errorCodeForbidden {
+		return false
+	}
+	if strings.TrimSpace(usage.Error) != "" {
+		return false
+	}
+	return true
+}
+
 // WindowStats 窗口期统计
 //
 // cost: 账号口径费用（total_cost * account_rate_multiplier）
@@ -363,7 +401,7 @@ func (s *AccountUsageService) GetUsage(ctx context.Context, accountID int64, for
 	// Antigravity 平台：使用 AntigravityQuotaFetcher 获取额度
 	if account.Platform == PlatformAntigravity {
 		usage, err := s.getAntigravityUsage(ctx, account)
-		if err == nil {
+		if err == nil && usageHealthyForErrorClear(usage) {
 			s.tryClearRecoverableAccountError(ctx, account)
 		}
 		return usage, err
@@ -371,7 +409,7 @@ func (s *AccountUsageService) GetUsage(ctx context.Context, accountID int64, for
 
 	if account.Platform == PlatformGrok {
 		usage, err := s.getGrokUsage(ctx, account, forceProbe)
-		if err == nil && usage != nil && usage.Error == "" {
+		if err == nil && usageHealthyForErrorClear(usage) {
 			s.tryClearRecoverableAccountError(ctx, account)
 		}
 		return usage, err
@@ -1468,10 +1506,16 @@ func (s *AccountUsageService) tryClearRecoverableAccountError(ctx context.Contex
 		return
 	}
 
+	// Sticky 403/forbidden from a previous probe often remains while chat/test still works.
+	// Clear when a subsequent healthy usage path proves the account is usable again.
 	if !strings.Contains(msg, "token refresh failed") &&
 		!strings.Contains(msg, "invalid_client") &&
 		!strings.Contains(msg, "missing_project_id") &&
-		!strings.Contains(msg, "unauthenticated") {
+		!strings.Contains(msg, "unauthenticated") &&
+		!strings.Contains(msg, "403") &&
+		!strings.Contains(msg, "forbidden") &&
+		!strings.Contains(msg, "access denied") &&
+		!strings.Contains(msg, "permission") {
 		return
 	}
 
@@ -1482,6 +1526,7 @@ func (s *AccountUsageService) tryClearRecoverableAccountError(ctx context.Contex
 
 	account.Status = StatusActive
 	account.ErrorMessage = ""
+	s.InvalidateAccountUsageCache(account.ID)
 }
 
 // buildUsageInfo 构建UsageInfo
