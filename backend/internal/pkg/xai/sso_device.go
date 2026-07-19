@@ -102,12 +102,31 @@ func (f *ssoDeviceFlow) convert(ctx context.Context) (*TokenResponse, error) {
 		return nil, fmt.Errorf("validate Grok Web SSO: %w", SSOHTTPError{Status: status})
 	}
 
-	status, _, body, err := f.do(ctx, http.MethodPost, SSODeviceURL, url.Values{
-		"client_id": {DefaultClientID},
-		"scope":     {SSOBuildScope},
-	})
-	if err != nil {
-		return nil, err
+	var body []byte
+	status = 0
+	// 18r29c: device/code 上游偶发 429，退避重试后再失败
+	for attempt := 1; attempt <= 5; attempt++ {
+		status, _, body, err = f.do(ctx, http.MethodPost, SSODeviceURL, url.Values{
+			"client_id": {DefaultClientID},
+			"scope":     {SSOBuildScope},
+		})
+		if err != nil {
+			return nil, err
+		}
+		if status >= 200 && status < 300 {
+			break
+		}
+		if status == http.StatusTooManyRequests && attempt < 5 {
+			delay := time.Duration(attempt*attempt) * 5 * time.Second
+			if delay > 45*time.Second {
+				delay = 45 * time.Second
+			}
+			if sleepErr := f.sleep(ctx, delay); sleepErr != nil {
+				return nil, sleepErr
+			}
+			continue
+		}
+		return nil, fmt.Errorf("start xAI device flow: %w", SSOHTTPError{Status: status})
 	}
 	if status < 200 || status >= 300 {
 		return nil, fmt.Errorf("start xAI device flow: %w", SSOHTTPError{Status: status})
