@@ -4,14 +4,14 @@
 
 ### Highlights
 - **A2G 导入改为服务端拉取 G2A 号池**（彻底绕过浏览器 CORS / Failed to fetch）。
-- **Sub2 ↔ G2A 运行时 peer 自动调配**：本地 Grok 号池耗尽 / failover 失败后，自动转发到宿主机 Grok2API。
-- 与既有「A2G 导入 / G2A SUB2 导入」账号互通互补：导入是静态合池，peer 是运行时灵活调配。
+- **Sub2 与 G2A 运行时 peer 自动调配**：本地 Grok 号池耗尽 / failover 失败后，自动转发到宿主机 Grok2API。
+- 与既有 A2G 导入 / G2A SUB2 导入互补：导入是静态合池，peer 是运行时灵活调配。
 - 版本标记：VERSION=0.1.162-a2g-server-pull。
 
 ### A2G 服务端拉取（账号池互通）
 - 新增 API：POST /api/v1/admin/accounts/fetch/g2a
   - 请求体：g2a_base_url + g2a_admin_key
-  - **Admin Key 必须是 G2A pp_key（管理后台登录密钥），不是 pi_key**
+  - **Admin Key 必须是 G2A app_key（管理后台登录密钥），不是 api_key**
 - POST /api/v1/admin/accounts/import/a2g 支持同一套 bridge 字段，后端代拉后入库
 - 后端候选地址自动尝试（Docker 友好）：
   - 用户填写地址
@@ -19,16 +19,16 @@
   - 172.24.80.1:8010（WSL/Docker 宿主机常见网关）
   - host.docker.internal:8010
   - 环境变量 GATEWAY_PEER_G2A_BASE_URL / G2A_HOST_REACHABLE
-- 去重：规范化 SSO **已存在一律 skipped，永不覆盖**
+- 去重：规范化 SSO 已存在一律 skipped，永不覆盖
 - User-Agent：Sub2API-G2A-Bridge/1.0
 
 ### Frontend
-- A2GImportModal.vue：浏览器直拉改为 dminAPI.accounts.fetchG2A / 一键 importA2G 服务端桥接
-- ccounts.ts：导出对象补挂 etchG2A（修复 Docker 前端构建 TS 失败）
-- 清理未使用的浏览器 candidateBaseUrls / etchJsonWithTimeout 残留
+- A2GImportModal.vue：浏览器直拉改为 adminAPI.accounts.fetchG2A / 一键 importA2G 服务端桥接
+- accounts.ts：导出对象补挂 fetchG2A（修复 Docker 前端构建 TS 失败）
+- 清理未使用的浏览器 candidateBaseUrls / fetchJsonWithTimeout 残留
 
 ### Peer G2A（运行时自动调配）
-- 新文件：ackend/internal/handler/peer_g2a.go
+- 新文件：backend/internal/handler/peer_g2a.go
 - 接入：openai_chat_completions.go、gateway_handler_chat_completions.go（本地耗尽 hook）
 - 环境变量：
   - GATEWAY_PEER_G2A_ENABLED=true
@@ -41,29 +41,25 @@
 - 成功可观察日志 peer.g2a.*，响应头 X-Peer-Source: g2a
 
 ### 本地验证（本机实测）
-- G2A http://127.0.0.1:8010/health OK；号池约 **230** SSO
+- G2A http://127.0.0.1:8010/health OK；号池约 230 SSO
 - Sub2 Docker http://127.0.0.1:8080/health OK
-- Admin JWT + POST .../fetch/g2a → **count=230**，ase_url_used=http://172.24.80.1:8010
+- Admin JWT + POST .../fetch/g2a -> count=230，base_url_used=http://172.24.80.1:8010
 - 镜像标签：local/sub2api:cpa-import / local/sub2api:a2g-server-pull
 
 ### 部署
 1. git pull
-2. 重建镜像并重启容器（示例）：
-   `ash
-   docker build -t local/sub2api:cpa-import .
-   docker compose up -d --force-recreate --no-deps sub2api
-   `
-3. Sub2 管理页 → 账号 → **A2G导入** → 填 http://127.0.0.1:8010 + G2A **app_key** → 拉取/导入
+2. 重建镜像并重启容器
+3. Sub2 管理页 -> 账号 -> A2G导入 -> 填 http://127.0.0.1:8010 + G2A app_key -> 拉取/导入
 4. 可选 peer：在 compose 注入 GATEWAY_PEER_G2A_* 后重启
 
 ### Notes
 - 不覆盖既有 GitHub tag/release。
 - 新 tag：stable-2026-07-19-a2g-server-pull-peer
-- 详见 [CHANGELOG_PEER_G2A.md](./CHANGELOG_PEER_G2A.md)
+- 详见 CHANGELOG_PEER_G2A.md 与 CHANGELOG_A2G_SERVER_PULL.md
 
 ## 2026-07-19 — batch-test-forbidden-fix
 
-详见 [CHANGELOG_BATCH_TEST.md](./CHANGELOG_BATCH_TEST.md)。
+详见 CHANGELOG_BATCH_TEST.md。
 
 - 批量测试连接（SSE，并发 3）
 - 修复测试/恢复成功后 UI 仍显示 forbidden（前后端 usage 缓存失效）
