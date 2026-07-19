@@ -1,4 +1,4 @@
-﻿package admin
+package admin
 
 import (
 	"strings"
@@ -67,5 +67,35 @@ func TestExtractAccountSSOTokens(t *testing.T) {
 	got := extractAccountSSOTokens(acc)
 	if len(got) != 1 || got[0] != "cookie-value-zzzzzzzz" {
 		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestMaskSSOToken(t *testing.T) {
+	short := maskSSOToken("short")
+	if short != "short" {
+		t.Fatalf("short=%q", short)
+	}
+	long := "abcdefghij1234567890xyz"
+	got := maskSSOToken(long)
+	if !strings.Contains(got, "...") {
+		t.Fatalf("expected masked, got %q", got)
+	}
+}
+
+func TestDefaultGrokA2GMaxConvertPositive(t *testing.T) {
+	if defaultGrokA2GMaxConvert <= 0 {
+		t.Fatalf("default max convert should be positive, got %d", defaultGrokA2GMaxConvert)
+	}
+	if defaultGrokA2GMaxConvert > 200 {
+		t.Fatalf("default max convert too large for interactive import: %d", defaultGrokA2GMaxConvert)
+	}
+}
+
+func TestNormalizeGrokEmail(t *testing.T) {
+	if got := normalizeGrokEmail("  Foo@Bar.COM "); got != "foo@bar.com" {
+		t.Fatalf("got %q", got)
+	}
+	if got := normalizeGrokEmail("not-an-email"); got != "" {
+		t.Fatalf("expected empty, got %q", got)
 	}
 }

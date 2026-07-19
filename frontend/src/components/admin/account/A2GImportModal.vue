@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <BaseDialog
     :show="show"
     :title="t('admin.accounts.a2gImportTitle')"
@@ -170,7 +170,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import { adminAPI } from '@/api/admin'
 import { useAppStore } from '@/stores/app'
 import type { GrokA2GImportResult } from '@/api/admin/accounts'
-import { getGrokSSOImportTimeout } from '@/api/admin/grok'
+import { getGrokA2GImportTimeout, GROK_A2G_DEFAULT_MAX_CONVERT } from '@/api/admin/grok'
 
 const STORAGE_URL_KEY = 'sub2api_a2g_g2a_base_url'
 
@@ -274,6 +274,25 @@ const handleClose = () => {
 
 const normalizeBaseUrl = (raw: string) => raw.trim().replace(/\/+$/, '')
 
+const formatA2GResult = (res: GrokA2GImportResult) => {
+  const parts = [
+    `total=${res.total ?? 0}`,
+    `created=${res.created ?? 0}`,
+    `skipped=${res.skipped ?? 0}`,
+    `failed=${res.failed ?? 0}`
+  ]
+  if (res.convert_attempted != null) parts.push(`convert=${res.convert_attempted}`)
+  if (res.deferred) parts.push(`deferred=${res.deferred}`)
+  if (res.existing_sso_skipped) parts.push(`sso_skip=${res.existing_sso_skipped}`)
+  if (res.existing_email_skipped) parts.push(`email_skip=${res.existing_email_skipped}`)
+  if (res.backfilled_sso) parts.push(`sso_backfill=${res.backfilled_sso}`)
+  if (res.max_convert != null) parts.push(`max_convert=${res.max_convert}`)
+  if (res.deferred && res.deferred > 0) {
+    parts.push('提示: 本次仅转换缺口上限内账号，请再次点击导入继续剩余')
+  }
+  return parts.join(' | ')
+}
+
 const handleFetchFromG2A = async () => {
   const key = g2aAdminKey.value.trim()
   const base = normalizeBaseUrl(g2aBaseUrl.value)
@@ -343,24 +362,27 @@ const handleImport = async () => {
         const res = await adminAPI.accounts.importA2G(
           {
             g2a_base_url: normalizeBaseUrl(g2aBaseUrl.value),
-            g2a_admin_key: g2aAdminKey.value.trim()
+            g2a_admin_key: g2aAdminKey.value.trim(),
+            only_missing: true,
+            max_convert: GROK_A2G_DEFAULT_MAX_CONVERT
           },
-          { timeout: getGrokSSOImportTimeout(300) }
+          { timeout: getGrokA2GImportTimeout(GROK_A2G_DEFAULT_MAX_CONVERT) }
         )
         result.value = res
+        const detail = formatA2GResult(res)
         const msgParams = {
           created: res.created,
           skipped: res.skipped,
           failed: res.failed
         }
         if (res.failed > 0) {
-          const msg = t('admin.accounts.a2gImportCompletedWithErrors', msgParams)
+          const msg = `${t('admin.accounts.a2gImportCompletedWithErrors', msgParams)}\n${detail}`
           setStatus(msg, 'error')
-          appStore.showError(msg)
+          appStore.showError(msg.slice(0, 400))
         } else {
-          const msg = t('admin.accounts.a2gImportSuccess', msgParams)
+          const msg = `${t('admin.accounts.a2gImportSuccess', msgParams)}\n${detail}`
           setStatus(msg, 'success')
-          appStore.showSuccess(msg)
+          appStore.showSuccess(msg.slice(0, 400))
           if (res.created > 0) emit('imported')
         }
       } catch (error: any) {
@@ -384,14 +406,22 @@ const handleImport = async () => {
   try {
     const roughCount = Math.max(
       1,
-      tokens.length || content.split(/\r?\n/).filter((l) => l.trim()).length
+      Math.min(
+        tokens.length || content.split(/\r?\n/).filter((l) => l.trim()).length,
+        GROK_A2G_DEFAULT_MAX_CONVERT
+      )
     )
     const payload: {
       tokens?: string[]
       content?: string
       g2a_base_url?: string
       g2a_admin_key?: string
-    } = {}
+      only_missing?: boolean
+      max_convert?: number
+    } = {
+      only_missing: true,
+      max_convert: GROK_A2G_DEFAULT_MAX_CONVERT
+    }
     if (tokens.length) payload.tokens = tokens
     if (content) payload.content = content
     // Also send bridge fields so backend can re-pull if needed
@@ -402,22 +432,23 @@ const handleImport = async () => {
       payload.g2a_admin_key = bridgeKey
     }
     const res = await adminAPI.accounts.importA2G(payload, {
-      timeout: getGrokSSOImportTimeout(roughCount)
+      timeout: getGrokA2GImportTimeout(roughCount)
     })
     result.value = res
+    const detail = formatA2GResult(res)
     const msgParams = {
       created: res.created,
       skipped: res.skipped,
       failed: res.failed
     }
     if (res.failed > 0) {
-      const msg = t('admin.accounts.a2gImportCompletedWithErrors', msgParams)
+      const msg = `${t('admin.accounts.a2gImportCompletedWithErrors', msgParams)}\n${detail}`
       setStatus(msg, 'error')
-      appStore.showError(msg)
+      appStore.showError(msg.slice(0, 400))
     } else {
-      const msg = t('admin.accounts.a2gImportSuccess', msgParams)
+      const msg = `${t('admin.accounts.a2gImportSuccess', msgParams)}\n${detail}`
       setStatus(msg, 'success')
-      appStore.showSuccess(msg)
+      appStore.showSuccess(msg.slice(0, 400))
       if (res.created > 0) emit('imported')
     }
   } catch (error: any) {

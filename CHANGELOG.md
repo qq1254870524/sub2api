@@ -1,3 +1,14 @@
+﻿
+## 0.1.163-a2g-dedup-maxconvert (2026-07-19)
+
+### A2G 导入加固
+- 邮箱/SSO 去重，已有账号不覆盖
+- 邮箱冲突时回填 credentials.sso（便于下次秒跳过）
+- 默认 max_convert=40，超额 deferred，请求分钟级结束（修复「A2G 导入中」假死）
+- 前端超时按转换预算计算（上限 45 分钟）
+- 日志：import_plan → import_progress → import_done
+
+详见 CHANGELOG_A2G_DEDUP_MAXCONVERT.md。
 # Changelog (fork qq1254870524/sub2api)
 
 ## stable-2026-07-19-a2g-server-pull-peer (2026-07-19)
@@ -121,3 +132,4 @@
 ### Base
 - Merged upstream Wei-Shaw/sub2api **v0.1.160**.
 - Preserved CPA import + Grok 429 multi-failover (budget 10).
+

@@ -21,6 +21,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// Default max SSO→OAuth conversions per A2G import request.
+// Historical Sub2 rows often lack credentials.sso, so email-level skip only
+// happens AFTER ConvertFromSSO; without a cap a full pool (300+) can run hours.
+const defaultGrokA2GMaxConvert = 40
+
 // GrokA2GImportRequest imports Grok2API (G2A) account-pool export into Sub2API.
 // Supported payloads:
 //   - plain text: one SSO token per line
@@ -49,6 +54,12 @@ type GrokA2GImportRequest struct {
 	RateMultiplier     *float64       `json:"rate_multiplier"`
 	ExpiresAt          *int64         `json:"expires_at"`
 	AutoPauseOnExpired *bool          `json:"auto_pause_on_expired"`
+	// OnlyMissing keeps semantics explicit for clients: skip existing SSO first.
+	// Email conflicts are still skipped after convert (G2A list has no emails).
+	OnlyMissing *bool `json:"only_missing"`
+	// MaxConvert limits how many tokens go through SSO→OAuth this request.
+	// 0 = default (40). Negative = unlimited (not recommended for full-pool).
+	MaxConvert *int `json:"max_convert"`
 }
 
 // GrokG2AFetchRequest is a lightweight probe/pull of G2A account pool via Sub2 backend.
@@ -66,12 +77,18 @@ type GrokG2AFetchResult struct {
 }
 
 type GrokA2GImportResult struct {
-	Total   int                    `json:"total"`
-	Created int                    `json:"created"`
-	Skipped int                    `json:"skipped"`
-	Failed  int                    `json:"failed"`
-	Items   []GrokA2GImportItem    `json:"items,omitempty"`
-	Errors  []GrokA2GImportMessage `json:"errors,omitempty"`
+	Total            int                    `json:"total"`
+	Created          int                    `json:"created"`
+	Skipped          int                    `json:"skipped"`
+	Failed           int                    `json:"failed"`
+	Deferred         int                    `json:"deferred,omitempty"`
+	ConvertAttempted int                    `json:"convert_attempted,omitempty"`
+	ExistingSSO      int                    `json:"existing_sso_skipped,omitempty"`
+	ExistingEmail    int                    `json:"existing_email_skipped,omitempty"`
+	BackfilledSSO    int                    `json:"backfilled_sso,omitempty"`
+	MaxConvert       int                    `json:"max_convert,omitempty"`
+	Items            []GrokA2GImportItem    `json:"items,omitempty"`
+	Errors           []GrokA2GImportMessage `json:"errors,omitempty"`
 }
 
 type GrokA2GImportItem struct {
@@ -79,7 +96,7 @@ type GrokA2GImportItem struct {
 	Name      string       `json:"name,omitempty"`
 	Email     string       `json:"email,omitempty"`
 	SSOMasked string       `json:"sso_masked,omitempty"`
-	Action    string       `json:"action"` // created | skipped | failed
+	Action    string       `json:"action"` // created | skipped | failed | deferred
 	AccountID int64        `json:"account_id,omitempty"`
 	Message   string       `json:"message,omitempty"`
 	Account   *dto.Account `json:"account,omitempty"`
@@ -152,23 +169,38 @@ func (h *GrokOAuthHandler) ImportA2G(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	existingSSO, _, err := h.listExistingGrokIdentitySets(ctx)
+	existingSSO, existingEmail, err := h.listExistingGrokIdentitySets(ctx)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
 
-	result := GrokA2GImportResult{
-		Total: len(tokens),
-		Items: make([]GrokA2GImportItem, 0, len(tokens)),
+	maxConvert := defaultGrokA2GMaxConvert
+	if req.MaxConvert != nil {
+		maxConvert = *req.MaxConvert
+	}
+	// Negative means unlimited; keep result.MaxConvert as requested for clients.
+	resultMaxConvert := maxConvert
+	if maxConvert < 0 {
+		resultMaxConvert = -1
 	}
 
-	// Pre-filter duplicates (existing pool + batch-local) so we never overwrite.
+	result := GrokA2GImportResult{
+		Total:      len(tokens),
+		Items:      make([]GrokA2GImportItem, 0, len(tokens)),
+		MaxConvert: resultMaxConvert,
+	}
+
+	// Pre-filter: SSO already in Sub2 → never convert / never overwrite.
+	// G2A /admin/api/tokens has no emails, so email skip happens after convert
+	// (and backfills SSO so subsequent imports pre-filter by SSO).
 	toImport := make([]string, 0, len(tokens))
+	deferredTokens := make(map[string]struct{})
 	for i, token := range tokens {
 		masked := maskSSOToken(token)
 		if _, exists := existingSSO[token]; exists {
 			result.Skipped++
+			result.ExistingSSO++
 			result.Items = append(result.Items, GrokA2GImportItem{
 				Index:     i + 1,
 				SSOMasked: masked,
@@ -177,12 +209,44 @@ func (h *GrokOAuthHandler) ImportA2G(c *gin.Context) {
 			})
 			continue
 		}
-		// mark as reserved for batch-local dedupe
+		// Cap expensive SSO→OAuth work so the HTTP request finishes.
+		if maxConvert >= 0 && len(toImport) >= maxConvert {
+			result.Deferred++
+			deferredTokens[token] = struct{}{}
+			result.Items = append(result.Items, GrokA2GImportItem{
+				Index:     i + 1,
+				SSOMasked: masked,
+				Action:    "deferred",
+				Message:   fmt.Sprintf("deferred: max_convert=%d reached; re-run A2G import to continue missing-only convert", maxConvert),
+			})
+			continue
+		}
+		// mark as reserved for batch-local SSO dedupe
 		existingSSO[token] = struct{}{}
 		toImport = append(toImport, token)
 	}
 
+	result.ConvertAttempted = len(toImport)
+	slog.Info("grok_a2g_import_plan",
+		"total", result.Total,
+		"existing_sso", result.ExistingSSO,
+		"to_convert", len(toImport),
+		"deferred", result.Deferred,
+		"max_convert", resultMaxConvert,
+		"existing_email_known", len(existingEmail),
+	)
+
 	if len(toImport) == 0 {
+		// Count deferred into skipped for legacy UI that only shows created/skipped/failed.
+		result.Skipped += result.Deferred
+		slog.Info("grok_a2g_import_done",
+			"total", result.Total,
+			"created", result.Created,
+			"skipped", result.Skipped,
+			"failed", result.Failed,
+			"deferred", result.Deferred,
+			"convert_attempted", 0,
+		)
 		response.Success(c, result)
 		return
 	}
@@ -209,13 +273,38 @@ func (h *GrokOAuthHandler) ImportA2G(c *gin.Context) {
 	}
 	jobs := make(chan grokSSOImportJob)
 	items := make([]grokSSOImportWorkerResult, len(toImport))
+	var progressMu sync.Mutex
+	var progressDone int
 	var wg sync.WaitGroup
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				items[job.index] = h.safeCreateAccountFromSSOToken(ctx, ssoReq, job.token, job.index+1, len(toImport))
+				wr := h.safeCreateAccountFromSSOToken(ctx, ssoReq, job.token, job.index+1, len(toImport))
+				// Batch-local email reservation after convert (covers concurrent workers).
+				if email := normalizeGrokEmail(wr.item.Email); email != "" {
+					progressMu.Lock()
+					if _, seen := existingEmail[email]; seen && wr.created {
+						// Another worker already claimed this email; treat as skip if create raced.
+						// createAccountFromSSOToken already DB-checks; this is defense in depth.
+					}
+					existingEmail[email] = struct{}{}
+					progressMu.Unlock()
+				}
+				items[job.index] = wr
+				progressMu.Lock()
+				progressDone++
+				done := progressDone
+				progressMu.Unlock()
+				if done == 1 || done == len(toImport) || done%5 == 0 {
+					slog.Info("grok_a2g_import_progress",
+						"done", done,
+						"total_convert", len(toImport),
+						"created_flag", wr.created,
+						"skipped_flag", wr.skipped,
+					)
+				}
 			}
 		}()
 	}
@@ -234,11 +323,17 @@ func (h *GrokOAuthHandler) ImportA2G(c *gin.Context) {
 	result.Items = result.Items[:0]
 	for i, token := range tokens {
 		masked := maskSSOToken(token)
-		// was skipped earlier?
+		// was skipped earlier by SSO?
 		if wi, ok := importIndexByToken[token]; ok {
 			wr := items[wi]
 			if wr.skipped {
 				result.Skipped++
+				if strings.Contains(strings.ToLower(wr.item.Error), "email") {
+					result.ExistingEmail++
+				}
+				if wr.backfilled {
+					result.BackfilledSSO++
+				}
 				result.Items = append(result.Items, GrokA2GImportItem{
 					Index:     i + 1,
 					Name:      wr.item.Name,
@@ -287,6 +382,15 @@ func (h *GrokOAuthHandler) ImportA2G(c *gin.Context) {
 			}
 			continue
 		}
+		if _, def := deferredTokens[token]; def {
+			result.Items = append(result.Items, GrokA2GImportItem{
+				Index:     i + 1,
+				SSOMasked: masked,
+				Action:    "deferred",
+				Message:   fmt.Sprintf("deferred: max_convert=%d reached; re-run A2G import to continue missing-only convert", maxConvert),
+			})
+			continue
+		}
 		result.Items = append(result.Items, GrokA2GImportItem{
 			Index:     i + 1,
 			SSOMasked: masked,
@@ -295,11 +399,20 @@ func (h *GrokOAuthHandler) ImportA2G(c *gin.Context) {
 		})
 	}
 
+	// Fold deferred into skipped for clients that only sum created+skipped+failed.
+	result.Skipped += result.Deferred
+
 	slog.Info("grok_a2g_import_done",
 		"total", result.Total,
 		"created", result.Created,
 		"skipped", result.Skipped,
 		"failed", result.Failed,
+		"deferred", result.Deferred,
+		"convert_attempted", result.ConvertAttempted,
+		"existing_sso", result.ExistingSSO,
+		"existing_email", result.ExistingEmail,
+		"backfilled_sso", result.BackfilledSSO,
+		"max_convert", resultMaxConvert,
 	)
 	response.Success(c, result)
 }
@@ -375,7 +488,7 @@ func (h *GrokOAuthHandler) ExportG2ASSO(c *gin.Context) {
 	response.Success(c, result)
 }
 
-// FetchG2A pulls SSO tokens from Grok2API via Sub2 backend (no import).
+// FetchG2A pulls SSO tokens from G2A via Sub2 backend (no import).
 // POST /api/v1/admin/accounts/fetch/g2a
 func (h *GrokOAuthHandler) FetchG2A(c *gin.Context) {
 	var req GrokG2AFetchRequest
@@ -395,6 +508,7 @@ func (h *GrokOAuthHandler) FetchG2A(c *gin.Context) {
 		))
 		return
 	}
+	slog.Info("grok_a2g_fetch", "base_url_used", used, "count", len(tokens), "tried", tried)
 	response.Success(c, GrokG2AFetchResult{
 		BaseURLUsed: used,
 		Count:       len(tokens),

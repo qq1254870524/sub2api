@@ -762,7 +762,7 @@ export interface GrokA2GImportItem {
   name?: string
   email?: string
   sso_masked?: string
-  action: 'created' | 'skipped' | 'failed' | string
+  action: 'created' | 'skipped' | 'failed' | 'deferred' | string
   account_id?: number
   message?: string
   account?: unknown
@@ -773,6 +773,12 @@ export interface GrokA2GImportResult {
   created: number
   skipped: number
   failed: number
+  deferred?: number
+  convert_attempted?: number
+  existing_sso_skipped?: number
+  existing_email_skipped?: number
+  backfilled_sso?: number
+  max_convert?: number
   items?: GrokA2GImportItem[]
   errors?: Array<{ index?: number; name?: string; message: string }>
 }
@@ -793,6 +799,8 @@ export interface GrokA2GImportRequest {
   extra?: Record<string, unknown>
   concurrency?: number
   priority?: number
+  only_missing?: boolean
+  max_convert?: number
 }
 
 export interface GrokG2AFetchRequest {

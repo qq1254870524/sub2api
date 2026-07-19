@@ -1,4 +1,4 @@
-﻿package admin
+package admin
 
 import (
 	"context"
@@ -299,9 +299,10 @@ type grokSSOImportJob struct {
 }
 
 type grokSSOImportWorkerResult struct {
-	created bool
-	skipped bool
-	item    GrokSSOToOAuthItemResult
+	created    bool
+	skipped    bool
+	backfilled bool
+	item       GrokSSOToOAuthItemResult
 }
 
 func (h *GrokOAuthHandler) CreateAccountsFromSSO(c *gin.Context) {
@@ -400,16 +401,41 @@ func (h *GrokOAuthHandler) createAccountFromSSOToken(ctx context.Context, req Gr
 	}
 
 	// Email-level dedupe for historical OAuth rows that lack stored SSO.
+	// If the existing row has no SSO, backfill credentials.sso so future A2G
+	// pre-filter can skip without another expensive ConvertFromSSO.
 	if email := normalizeGrokEmail(tokenInfo.Email); email != "" {
 		if existing, findErr := h.findGrokAccountByEmail(ctx, email); findErr == nil && existing != nil {
+			msg := "email already exists in Sub2API; not overwritten"
+			backfilled := false
+			accountDTO := dto.AccountFromService(existing)
+			if normalized := xai.NormalizeSSOToken(token); normalized != "" {
+				if len(extractAccountSSOTokens(*existing)) == 0 {
+					creds := cloneGrokSSOMap(existing.Credentials)
+					if creds == nil {
+						creds = map[string]any{}
+					}
+					creds["sso"] = normalized
+					if updated, updErr := h.adminService.UpdateAccount(ctx, existing.ID, &service.UpdateAccountInput{
+						Credentials: creds,
+					}); updErr == nil && updated != nil {
+						backfilled = true
+						msg = "email already exists; SSO backfilled for future dedupe (account not overwritten)"
+						accountDTO = dto.AccountFromService(updated)
+						slog.Info("grok_sso_backfill", "account_id", existing.ID, "email", email)
+					} else if updErr != nil {
+						slog.Warn("grok_sso_backfill_failed", "account_id", existing.ID, "error", updErr.Error())
+					}
+				}
+			}
 			return grokSSOImportWorkerResult{
-				skipped: true,
+				skipped:    true,
+				backfilled: backfilled,
 				item: GrokSSOToOAuthItemResult{
 					Index:   index,
 					Name:    existing.Name,
 					Email:   email,
-					Account: dto.AccountFromService(existing),
-					Error:   "email already exists in Sub2API; not overwritten",
+					Account: accountDTO,
+					Error:   msg,
 				},
 			}
 		}
