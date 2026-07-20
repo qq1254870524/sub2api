@@ -1,4 +1,10 @@
 ## 0.1.165-upstream-162-full-pool (2026-07-20)
+### Compose concurrency env wiring (2026-07-20)
+- Wire H2C / gateway connection pool / scheduling / body size env vars into docker-compose (previously only in `.env`, not injected)
+- Postgres `max_connections` from `POSTGRES_MAX_CONNECTIONS` (default 1024)
+- Live deploy verified: H2C streams=128, max_conns_per_host=2048, max_idle_conns=8192, full-pool switches=0
+
+
 ### Deploy verified 2026-07-20
 - WSL /home/baoge/sub2api-deploy force-recreate local/sub2api:cpa-import
 - Runtime GATEWAY_MAX_ACCOUNT_SWITCHES=0 / GATEWAY_MAX_ACCOUNT_SWITCHES_GEMINI=0

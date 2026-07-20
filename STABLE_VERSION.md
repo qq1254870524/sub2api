@@ -11,3 +11,4 @@
 - Health: http://127.0.0.1:8080/health => ok
 - Binary markers: import/grok-cpa, import/a2g, fetch/g2a, export/g2a-sso, PeerG2A, AccountSwitchesExhausted
 - Binary reports: Sub2API 0.1.162 (upstream baseline) / VERSION file 0.1.165-upstream-162-full-pool
+- Perf env wired live: H2C streams=128, gateway max_conns_per_host=2048, max_idle=8192/4096, postgres max_connections=1024
