@@ -634,8 +634,6 @@ import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
 
-// xAI Free billing exposes a window without usage_percent, so estimate it from local tokens.
-const GROK_FREE_TOKEN_LIMIT = 2_000_000
 
 const props = withDefaults(
   defineProps<{
