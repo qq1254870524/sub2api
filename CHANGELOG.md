@@ -1,4 +1,10 @@
 ## 0.1.165-upstream-162-full-pool (2026-07-20)
+### Deploy verified 2026-07-20
+- WSL /home/baoge/sub2api-deploy force-recreate local/sub2api:cpa-import
+- Runtime GATEWAY_MAX_ACCOUNT_SWITCHES=0 / GATEWAY_MAX_ACCOUNT_SWITCHES_GEMINI=0
+- Health OK; fork routes present (CPA/A2G/fetch/export/PeerG2A)
+- Compose templates wire full-pool env defaults
+
 
 ### Upstream
 - Merge [Wei-Shaw/sub2api v0.1.162](https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.162)
