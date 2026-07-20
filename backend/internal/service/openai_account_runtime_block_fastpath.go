@@ -16,16 +16,14 @@ const (
 	openAIOAuth429StormWindow             = 10 * time.Second
 	openAIOAuth429StormThreshold          = 20
 	openAIOAuth429StormMaxAccountSwitches = 1
-	// Grok free/subscription pools often have many accounts briefly 429'd.
-	// Allow enough request-local switches to align with gateway.max_account_switches
-	// default (10) so one request can land on a healthy account instead of
-	// exhausting after a single follow-up ("exceeded retry limit ... 429").
-	grokOAuth429MaxAccountSwitches = 10
+	// Legacy fallback only used when cfg is nil.
+	// Live budget follows gateway.max_account_switches (0 = unlimited full-pool failover).
+	grokOAuth429MaxAccountSwitches = 0
 )
 
 // OpenAIOAuth429FailoverState tracks request-local Grok OAuth 429 failover budget.
 // After the first Grok OAuth 429, additional different accounts may be tried up to
-// grokOAuth429MaxAccountSwitches total switches for that request.
+// gateway.max_account_switches total switches for that request (0 = unlimited).
 type OpenAIOAuth429FailoverState struct {
 	grokOAuth429FailoverArmed bool
 }
@@ -328,24 +326,39 @@ func (s *OpenAIGatewayService) isOpenAIOAuth429Storm() bool {
 	return s.openaiOAuth429WindowCount.Load() >= openAIOAuth429StormThreshold
 }
 
+func openAIAccountSwitchBudgetExhausted(maxSwitches, failedSwitches int) bool {
+	if maxSwitches <= 0 {
+		return false
+	}
+	return failedSwitches >= maxSwitches
+}
+
+func (s *OpenAIGatewayService) grokOAuth429SwitchLimit() int {
+	if s != nil && s.cfg != nil {
+		return s.cfg.Gateway.MaxAccountSwitches
+	}
+	return grokOAuth429MaxAccountSwitches
+}
+
 func (s *OpenAIGatewayService) ShouldStopOpenAIOAuth429Failover(account *Account, statusCode int, failedSwitches int, state *OpenAIOAuth429FailoverState) bool {
+	limit := s.grokOAuth429SwitchLimit()
 	if isGrokOAuthAccount(account) {
 		if state == nil {
 			// Higher threshold for callers that have not adopted request-local state.
-			return statusCode == http.StatusTooManyRequests && failedSwitches >= grokOAuth429MaxAccountSwitches
+			return statusCode == http.StatusTooManyRequests && openAIAccountSwitchBudgetExhausted(limit, failedSwitches)
 		}
 		if statusCode == http.StatusTooManyRequests {
 			state.grokOAuth429FailoverArmed = true
 		}
 		if state.grokOAuth429FailoverArmed {
-			return failedSwitches >= grokOAuth429MaxAccountSwitches
+			return openAIAccountSwitchBudgetExhausted(limit, failedSwitches)
 		}
 		return false
 	}
 	// Mixed pools: once a Grok OAuth 429 armed the budget, keep counting against
 	// that budget even if the next candidate is an API-key account.
 	if state != nil && state.grokOAuth429FailoverArmed {
-		return failedSwitches >= grokOAuth429MaxAccountSwitches
+		return openAIAccountSwitchBudgetExhausted(limit, failedSwitches)
 	}
 	if failedSwitches < openAIOAuth429StormMaxAccountSwitches {
 		return false

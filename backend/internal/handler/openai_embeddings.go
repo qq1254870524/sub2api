@@ -105,10 +105,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	var lastFailoverErr *service.UpstreamFailoverError
 	switchCount := 0
-	maxAccountSwitches := h.maxAccountSwitches
-	if maxAccountSwitches <= 0 {
-		maxAccountSwitches = 3
-	}
+	maxAccountSwitches := h.maxAccountSwitches // <=0 = unlimited full-pool failover
 	routingStart := time.Now()
 
 	for {
@@ -208,7 +205,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 				h.gatewayService.RecordOpenAIAccountSwitch()
 				failedAccountIDs[account.ID] = struct{}{}
 				lastFailoverErr = failoverErr
-				if switchCount >= maxAccountSwitches {
+				if AccountSwitchesExhausted(maxAccountSwitches, switchCount) {
 					h.handleFailoverExhausted(c, failoverErr, false)
 					return
 				}

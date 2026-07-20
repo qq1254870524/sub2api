@@ -300,7 +300,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					h.gatewayService.RecordOpenAIAccountSwitch()
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
-					if switchCount >= maxAccountSwitches {
+					if AccountSwitchesExhausted(maxAccountSwitches, switchCount) {
 						if tryPeerG2AOnExhausted(c, body, streamStarted, failoverErr) {
 							return
 						}

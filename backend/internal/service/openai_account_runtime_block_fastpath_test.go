@@ -150,33 +150,45 @@ func TestShouldStopOpenAIOAuth429Failover_OnlyDuringStorm(t *testing.T) {
 }
 
 func TestShouldStopOpenAIOAuth429Failover_TracksGrokFollowupBudget(t *testing.T) {
-	svc := &OpenAIGatewayService{}
 	account := &Account{ID: 44, Platform: PlatformGrok, Type: AccountTypeOAuth}
 	apiKeyAccount := &Account{ID: 45, Platform: PlatformGrok, Type: AccountTypeAPIKey}
 
-	t.Run("429 arms budget and stops at max switches", func(t *testing.T) {
+	t.Run("429 arms budget and stops at configured max switches", func(t *testing.T) {
+		svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxAccountSwitches: 10}}}
 		var state OpenAIOAuth429FailoverState
 		require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 1, &state))
 		require.True(t, state.grokOAuth429FailoverArmed)
 		require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusInternalServerError, 2, &state))
-		require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, grokOAuth429MaxAccountSwitches-1, &state))
-		require.True(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusBadGateway, grokOAuth429MaxAccountSwitches, &state))
+		require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 9, &state))
+		require.True(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusBadGateway, 10, &state))
+	})
+
+	t.Run("max_account_switches 0 means unlimited full-pool failover", func(t *testing.T) {
+		svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxAccountSwitches: 0}}}
+		var state OpenAIOAuth429FailoverState
+		require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 1, &state))
+		require.True(t, state.grokOAuth429FailoverArmed)
+		require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 800, &state))
+		require.False(t, svc.ShouldStopOpenAIOAuth429Failover(apiKeyAccount, http.StatusInternalServerError, 999, &state))
 	})
 
 	t.Run("500 alone does not arm or stop early", func(t *testing.T) {
+		svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxAccountSwitches: 10}}}
 		var state OpenAIOAuth429FailoverState
 		require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusInternalServerError, 1, &state))
 		require.False(t, state.grokOAuth429FailoverArmed)
-		require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusBadGateway, grokOAuth429MaxAccountSwitches, &state))
+		require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusBadGateway, 10, &state))
 	})
 
 	t.Run("OAuth 429 then API-key failures share the same budget", func(t *testing.T) {
+		svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxAccountSwitches: 10}}}
 		var state OpenAIOAuth429FailoverState
 		require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 1, &state))
 		require.False(t, svc.ShouldStopOpenAIOAuth429Failover(apiKeyAccount, http.StatusInternalServerError, 2, &state))
-		require.True(t, svc.ShouldStopOpenAIOAuth429Failover(apiKeyAccount, http.StatusInternalServerError, grokOAuth429MaxAccountSwitches, &state))
+		require.True(t, svc.ShouldStopOpenAIOAuth429Failover(apiKeyAccount, http.StatusInternalServerError, 10, &state))
 	})
 
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxAccountSwitches: 0}}}
 	var state OpenAIOAuth429FailoverState
 	require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 0, &state))
 	require.False(t, svc.ShouldStopOpenAIOAuth429Failover(apiKeyAccount, http.StatusTooManyRequests, 2, &state))

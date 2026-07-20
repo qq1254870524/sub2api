@@ -271,13 +271,39 @@ func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleFailoverError_CacheBilling(t *testing.T) {
-	t.Run("hasBoundSession为true时设置ForceCacheBilling", func(t *testing.T) {
+	t.Run("hasBoundSession为true且实际切换时设置ForceCacheBilling", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
 		fs := NewFailoverState(3, true) // hasBoundSession=true
 		err := newTestFailoverErr(500, false, false)
 
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
 		require.True(t, fs.ForceCacheBilling)
+	})
+
+	t.Run("同账号重试时仅凭hasBoundSession不设置ForceCacheBilling", func(t *testing.T) {
+		mock := &mockTempUnscheduler{}
+		fs := NewFailoverState(3, true)
+		err := newTestFailoverErr(400, true, false)
+
+		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
+
+		require.False(t, fs.ForceCacheBilling)
+		require.Zero(t, fs.SwitchCount)
+	})
+
+	t.Run("同账号重试耗尽并实际切换时设置ForceCacheBilling", func(t *testing.T) {
+		mock := &mockTempUnscheduler{}
+		fs := NewFailoverState(3, true)
+		err := newTestFailoverErr(400, true, false)
+
+		for i := 0; i < maxSameAccountRetries; i++ {
+			fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
+			require.False(t, fs.ForceCacheBilling)
+		}
+		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
+
+		require.True(t, fs.ForceCacheBilling)
+		require.Equal(t, 1, fs.SwitchCount)
 	})
 
 	t.Run("failoverErr.ForceCacheBilling为true时设置", func(t *testing.T) {
@@ -287,6 +313,17 @@ func TestHandleFailoverError_CacheBilling(t *testing.T) {
 
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
 		require.True(t, fs.ForceCacheBilling)
+	})
+
+	t.Run("同账号重试保留显式ForceCacheBilling", func(t *testing.T) {
+		mock := &mockTempUnscheduler{}
+		fs := NewFailoverState(3, true)
+		err := newTestFailoverErr(400, true, true)
+
+		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
+
+		require.True(t, fs.ForceCacheBilling)
+		require.Zero(t, fs.SwitchCount)
 	})
 
 	t.Run("两者均为false时不设置", func(t *testing.T) {
@@ -633,13 +670,14 @@ func TestHandleFailoverError_IntegrationScenario(t *testing.T) {
 		for i := 0; i < maxSameAccountRetries; i++ {
 			action := fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, retryErr)
 			require.Equal(t, FailoverContinue, action)
+			require.False(t, fs.ForceCacheBilling, "同账号重试期间不应仅因绑定会话强制缓存计费")
 		}
-		require.True(t, fs.ForceCacheBilling, "hasBoundSession=true 应设置 ForceCacheBilling")
 
 		// 2. 账号 100 超过重试上限 → TempUnschedule + 切换
 		action := fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, retryErr)
 		require.Equal(t, FailoverContinue, action)
 		require.Equal(t, 1, fs.SwitchCount)
+		require.True(t, fs.ForceCacheBilling, "实际切换账号时应设置 ForceCacheBilling")
 		require.Len(t, mock.calls, 1)
 
 		// 3. 账号 200 遇到不可重试错误 → 直接切换
@@ -902,4 +940,31 @@ func TestFailoverClientGone(t *testing.T) {
 	t.Run("nil安全", func(t *testing.T) {
 		require.False(t, failoverClientGone(nil))
 	})
+}
+
+
+func TestAccountSwitchesExhaustedUnlimited(t *testing.T) {
+	require.False(t, AccountSwitchesExhausted(0, 0))
+	require.False(t, AccountSwitchesExhausted(0, 5))
+	require.False(t, AccountSwitchesExhausted(0, 800))
+	require.False(t, AccountSwitchesExhausted(-1, 999))
+	require.False(t, AccountSwitchesExhausted(5, 4))
+	require.True(t, AccountSwitchesExhausted(5, 5))
+	require.True(t, AccountSwitchesExhausted(5, 6))
+	require.True(t, AccountSwitchesWithinBudget(0, 800))
+	require.True(t, AccountSwitchesWithinBudget(5, 5))
+	require.False(t, AccountSwitchesWithinBudget(5, 6))
+}
+
+func TestHandleFailoverErrorUnlimitedSwitches(t *testing.T) {
+	fs := NewFailoverState(0, false)
+	unscheduler := &mockTempUnscheduler{}
+	for i := 0; i < 50; i++ {
+		// RetryableOnSameAccount=false + legacy error => switch to next account.
+		err := newTestFailoverErr(http.StatusTooManyRequests, false, false)
+		action := fs.HandleFailoverError(context.Background(), unscheduler, int64(i+1), service.PlatformGrok, maxSameAccountRetries, err)
+		require.Equal(t, FailoverContinue, action, "iteration %d", i)
+	}
+	require.Equal(t, 50, fs.SwitchCount)
+	require.Len(t, fs.FailedAccountIDs, 50)
 }

@@ -32,10 +32,7 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 		return
 	}
 
-	maxAccountSwitches := h.maxAccountSwitches
-	if maxAccountSwitches <= 0 {
-		maxAccountSwitches = 3
-	}
+	maxAccountSwitches := h.maxAccountSwitches // <=0 = unlimited full-pool failover
 	failedAccountIDs := make(map[int64]struct{})
 	switchCount := 0
 	var lastUpstreamErr error
@@ -53,13 +50,15 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 			h.errorResponse(c, http.StatusServiceUnavailable, "upstream_error", "No available OpenAI accounts")
 			return
 		}
+		// 让 ops 错误日志携带实际选中的上游账号，便于定位失效账号（#4544）。
+		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		manifest, err := h.gatewayService.FetchCodexModelsManifest(c.Request.Context(), account, c.Query("client_version"), c.GetHeader("If-None-Match"))
 		if err != nil {
 			if c.Request.Context().Err() != nil {
 				return
 			}
-			if service.IsRetryableCodexModelsManifestError(err) && switchCount < maxAccountSwitches {
+			if service.IsRetryableCodexModelsManifestError(err) && !AccountSwitchesExhausted(maxAccountSwitches, switchCount) {
 				failedAccountIDs[account.ID] = struct{}{}
 				switchCount++
 				lastUpstreamErr = err

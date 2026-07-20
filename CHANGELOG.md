@@ -1,3 +1,37 @@
+## 0.1.165-upstream-162-full-pool (2026-07-20)
+
+### Upstream
+- Merge [Wei-Shaw/sub2api v0.1.162](https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.162)
+- Absorb upstream TTFT/concurrency-related fixes (responses image intent, SSE type) plus Grok/OpenAI/sticky/quota/WS/security/frontend fixes
+
+### Keep fork customizations
+- CPA/CLIProxy xai OAuth import: `POST /api/v1/admin/accounts/import/grok-cpa` + Import Data UI
+- A2G import / server-side G2A fetch / export g2a-sso / Peer G2A runtime forward
+- A2G dedupe + max_convert + SSO backfill (fix UI hang)
+- Full-pool failover: `max_account_switches=0` (800+ accounts no longer hard-capped at ~5/10)
+- Grok OAuth 429 switch budget aligned to `gateway.max_account_switches` (0=full pool)
+
+### Performance / deploy
+- Default pools: DB max_open=256 max_idle=128; Redis pool_size=1024; gateway max_idle_conns=2560
+- Deploy image still local build `local/sub2api:cpa-import` (`pull_policy: never`)
+- Production: set `GATEWAY_MAX_ACCOUNT_SWITCHES=0` or `gateway.max_account_switches: 0`
+
+### Version markers
+- VERSION: `0.1.165-upstream-162-full-pool`
+- backend/cmd/server/VERSION: `0.1.162` (upstream baseline)
+
+## 0.1.164-full-pool-failover (2026-07-20)
+
+### 账号全池 Failover
+- **根因**：单次请求切换账号有硬顶 `gateway.max_account_switches`（历史默认 10；OpenAI handler 无配置时甚至 fallback 到 3），Grok OAuth 429 还有额外硬顶 10。因此 800+ 号池也只会试少量账号后返回失败。
+- **改动**：
+  - `max_account_switches` / `max_account_switches_gemini` 默认改为 **0 = 不限制**，失败时继续切换直到号池无可选账号。
+  - 所有 handler 去掉 `<=0 强制改成 3/10` 的错误 fallback。
+  - Grok OAuth 429 请求内切换预算与 `gateway.max_account_switches` 对齐（0=全池）。
+  - `AccountSwitchesExhausted` / `AccountSwitchesWithinBudget` 统一语义。
+- **配置**：`gateway.max_account_switches: 0`（推荐大号池）；若要硬顶可设正数如 `5`/`10`。
+- **注意**：全池切换可能拉长单次请求耗时；仍受客户端超时与上游超时约束。
+
 ﻿
 ## 0.1.163-a2g-dedup-maxconvert (2026-07-19)
 

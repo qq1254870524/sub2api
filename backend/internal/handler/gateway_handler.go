@@ -78,16 +78,13 @@ func NewGatewayHandler(
 	settingService *service.SettingService,
 ) *GatewayHandler {
 	pingInterval := time.Duration(0)
-	maxAccountSwitches := 10
-	maxAccountSwitchesGemini := 3
+	// <=0 表示不限制账号切换次数（失败时尽量扫完整号池）
+	maxAccountSwitches := 0
+	maxAccountSwitchesGemini := 0
 	if cfg != nil {
 		pingInterval = time.Duration(cfg.Concurrency.PingInterval) * time.Second
-		if cfg.Gateway.MaxAccountSwitches > 0 {
-			maxAccountSwitches = cfg.Gateway.MaxAccountSwitches
-		}
-		if cfg.Gateway.MaxAccountSwitchesGemini > 0 {
-			maxAccountSwitchesGemini = cfg.Gateway.MaxAccountSwitchesGemini
-		}
+		maxAccountSwitches = cfg.Gateway.MaxAccountSwitches
+		maxAccountSwitchesGemini = cfg.Gateway.MaxAccountSwitchesGemini
 	}
 
 	// 初始化用户消息串行队列 helper

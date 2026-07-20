@@ -4,17 +4,25 @@ This fork tracks upstream [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api
 
 1. **CPA / CLIProxy xai OAuth import**
    - API: `POST /api/v1/admin/accounts/import/grok-cpa`
-   - UI: Admin → Import Data accepts `xai-*.json` (`type=xai` / `auth_kind=oauth` / refresh+email)
+   - UI: Admin -> Import Data accepts `xai-*.json` (`type=xai` / `auth_kind=oauth` / refresh+email)
 2. **Grok OAuth 429 multi-account failover**
-   - Request-local switch budget: 10 (`grokOAuth429MaxAccountSwitches`)
-   - Skip rate-limited Grok accounts in scheduler (`shouldAutoPauseGrokAccountByQuota`)
-   - Reduces client-visible `exceeded retry limit, last status: 429 Too Many Requests`
+   - Request-local switch budget follows `gateway.max_account_switches` (**0 = full pool**, no artificial cap)
+   - Skip rate-limited Grok accounts in scheduler
+   - 2026-07-20: removed max=10/3 truncations that stopped after ~5-10 accounts on 800+ pools
+3. **Grok2API (G2A) <-> Sub2API account pool bridge**
+   - A2G import: `POST /api/v1/admin/accounts/import/a2g` + Admin menu
+   - Server-side pull: `POST /api/v1/admin/accounts/fetch/g2a`
+   - Export: `GET /api/v1/admin/accounts/export/g2a-sso`
+   - SSO dedupe, never overwrite existing accounts
+   - Peer G2A runtime failover when local pool exhausted
+4. **Full-pool failover (800+ accounts)**
+   - `gateway.max_account_switches=0` / `max_account_switches_gemini=0` means unlimited switches
 
+Current baseline: **upstream v0.1.162** + fork customizations (CPA + A2G + peer G2A + full-pool failover).
 
-3. **Grok2API (G2A) ↔ Sub2API 账号池互通**
-   - Sub2API **A2G导入**: `POST /api/v1/admin/accounts/import/a2g` + Admin 菜单「A2G导入」
-   - 解析 G2A txt/JSON pool；按规范化 SSO 去重，**不覆盖**已有账号
-   - 导入后持久化 `credentials.sso` 便于双向对账
-   - 反向方向在 Grok2API 侧为 **SUB2导入**（见 grok2api 仓库）
+## 2026-07-20 — v0.1.165-upstream-162-full-pool
+- Merge upstream tag `v0.1.162` (perf responses/SSE, Grok/OpenAI/sticky/quota/WS/security/frontend fixes).
+- Keep all prior fork features listed above.
+- Default full-pool account switches (0 = unlimited) for large account pools.
+- Concurrency defaults with upstream: DB 256/128, Redis pool 1024+, gateway max_idle_conns 2560, WS pool/ttft weights.
 
-Current baseline: **upstream v0.1.161** + fork2 customizations (CPA + 429 failover + A2G import).
