@@ -8,9 +8,15 @@ permissions:
   packages: write
 
 jobs:
-  republish:
+  build-and-push:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -18,17 +24,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull existing linked image and re-push with GITHUB_TOKEN
-        run: |
-          set -euo pipefail
-          SRC=ghcr.io/qq1254870524/sub2api:stable-2026-07-26-upstream-165-full-pool
-          docker pull "$SRC"
-          for tag in \
-            stable-2026-07-26-upstream-165-full-pool \
-            0.1.168-upstream-165-full-pool \
-            latest
-          do
-            docker tag "$SRC" "ghcr.io/qq1254870524/sub2api:${tag}"
-            docker push "ghcr.io/qq1254870524/sub2api:${tag}"
-          done
-          echo REPUBLISH_DONE
+      - name: Build and push public image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ghcr.io/qq1254870524/sub2api:latest
+            ghcr.io/qq1254870524/sub2api:stable-2026-07-26-upstream-165-full-pool
+            ghcr.io/qq1254870524/sub2api:0.1.168-upstream-165-full-pool
+          labels: |
+            org.opencontainers.image.source=https://github.com/qq1254870524/sub2api
+            org.opencontainers.image.version=0.1.168-upstream-165-full-pool
+            org.opencontainers.image.description=Fork upstream v0.1.165 + CPA/A2G/peer G2A + full-pool failover
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
