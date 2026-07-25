@@ -1,0 +1,34 @@
+name: Publish GHCR Public
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  republish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull existing linked image and re-push with GITHUB_TOKEN
+        run: |
+          set -euo pipefail
+          SRC=ghcr.io/qq1254870524/sub2api:stable-2026-07-26-upstream-165-full-pool
+          docker pull "$SRC"
+          for tag in \
+            stable-2026-07-26-upstream-165-full-pool \
+            0.1.168-upstream-165-full-pool \
+            latest
+          do
+            docker tag "$SRC" "ghcr.io/qq1254870524/sub2api:${tag}"
+            docker push "ghcr.io/qq1254870524/sub2api:${tag}"
+          done
+          echo REPUBLISH_DONE
