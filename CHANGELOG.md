@@ -1,3 +1,35 @@
+## 0.1.168-upstream-165-full-pool (2026-07-26)
+
+### Upstream
+- Merge [Wei-Shaw/sub2api v0.1.165](https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.165) (content baseline; server VERSION synced to 0.1.165)
+- Highlights absorbed from upstream:
+  - ChatGPT Live gateway (`/v1/live`, Codex realtime calls), group Live switch, lease + usage
+  - Anthropic `claude-opus-5` model/pricing/frontend/Bedrock mapping
+  - Ollama Cloud usage request-driven refresh + debounce/floor fixes
+  - Persist client `session_id` on usage records
+  - Announcement preview + rich-text/display fixes; affiliate mobile copy
+  - Registration email-alias dedup (dot / plus / googlemail) with race/bypass fixes
+  - OpenAI proxy stream circuit breaker envs
+  - OpenAI pool-mode temp unschedulable model isolation tests/behavior
+  - OpenAI/Grok/Gemini assorted gateway, sticky, item-id, tool-choice, image diagnostics fixes
+  - Frontend postcss >=8.5.18 security bump
+
+### Keep fork customizations
+- CPA/CLIProxy xai OAuth import: `POST /api/v1/admin/accounts/import/grok-cpa` + Import Data UI
+- A2G import / server-side G2A fetch / export g2a-sso / Peer G2A runtime forward
+- A2G dedupe + max_convert + SSO backfill (fix UI hang)
+- Full-pool failover: `max_account_switches=0` (800+ accounts no hard cap)
+- Grok OAuth 429 switch budget aligned to `gateway.max_account_switches` (0=full pool)
+- Compose concurrency env wiring (H2C/pool/scheduling/body) + full-pool env defaults
+- Combined with upstream OpenAI proxy stream circuit envs in compose/`.env.example`
+
+### Process safety
+- Source/update/package/release only; **do not stop** live Sub2API on :8080
+
+### Version markers
+- VERSION: `0.1.168-upstream-165-full-pool`
+- backend/cmd/server/VERSION: `0.1.165` (upstream baseline)
+
 ## 0.1.165-upstream-162-full-pool (2026-07-20)
 ### Compose concurrency env wiring (2026-07-20)
 - Wire H2C / gateway connection pool / scheduling / body size env vars into docker-compose (previously only in `.env`, not injected)
