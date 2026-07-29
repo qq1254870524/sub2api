@@ -299,8 +299,10 @@ type grokSSOImportJob struct {
 }
 
 type grokSSOImportWorkerResult struct {
-	created bool
-	item    GrokSSOToOAuthItemResult
+	created    bool
+	skipped    bool
+	backfilled bool
+	item       GrokSSOToOAuthItemResult
 }
 
 func (h *GrokOAuthHandler) CreateAccountsFromSSO(c *gin.Context) {
@@ -316,6 +318,32 @@ func (h *GrokOAuthHandler) CreateAccountsFromSSO(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+	preSkipped := make([]GrokSSOToOAuthItemResult, 0)
+	if existingSSO, err := h.listExistingGrokSSOSet(ctx); err == nil {
+		filtered := make([]string, 0, len(tokens))
+		for i, token := range tokens {
+			if _, ok := existingSSO[token]; ok {
+				preSkipped = append(preSkipped, GrokSSOToOAuthItemResult{
+					Index: i + 1,
+					Error: "SSO already exists; not overwritten",
+				})
+				continue
+			}
+			existingSSO[token] = struct{}{}
+			filtered = append(filtered, token)
+		}
+		tokens = filtered
+	}
+
+	result := GrokSSOToOAuthResponse{
+		Created: make([]GrokSSOToOAuthItemResult, 0, len(tokens)),
+		Failed:  append([]GrokSSOToOAuthItemResult{}, preSkipped...),
+	}
+	if len(tokens) == 0 {
+		response.Success(c, result)
+		return
+	}
+
 	workerCount := grokSSOImportConcurrency
 	if len(tokens) < workerCount {
 		workerCount = len(tokens)
@@ -338,13 +366,12 @@ func (h *GrokOAuthHandler) CreateAccountsFromSSO(c *gin.Context) {
 	close(jobs)
 	wg.Wait()
 
-	result := GrokSSOToOAuthResponse{
-		Created: make([]GrokSSOToOAuthItemResult, 0, len(tokens)),
-		Failed:  make([]GrokSSOToOAuthItemResult, 0),
-	}
 	for _, item := range items {
 		if item.created {
 			result.Created = append(result.Created, item.item)
+		} else if item.skipped {
+			// Treat identity-level skip as non-fatal (already present).
+			result.Failed = append(result.Failed, item.item)
 		} else {
 			result.Failed = append(result.Failed, item.item)
 		}
@@ -373,7 +400,52 @@ func (h *GrokOAuthHandler) createAccountFromSSOToken(ctx context.Context, req Gr
 		return grokSSOImportWorkerResult{item: GrokSSOToOAuthItemResult{Index: index, Error: grokSSOImportErrorMessage(err)}}
 	}
 
+	// Email-level dedupe for historical OAuth rows that lack stored SSO.
+	// If the existing row has no SSO, backfill credentials.sso so future A2G
+	// pre-filter can skip without another expensive ConvertFromSSO.
+	if email := normalizeGrokEmail(tokenInfo.Email); email != "" {
+		if existing, findErr := h.findGrokAccountByEmail(ctx, email); findErr == nil && existing != nil {
+			msg := "email already exists in Sub2API; not overwritten"
+			backfilled := false
+			accountDTO := dto.AccountFromService(existing)
+			if normalized := xai.NormalizeSSOToken(token); normalized != "" {
+				if len(extractAccountSSOTokens(*existing)) == 0 {
+					creds := cloneGrokSSOMap(existing.Credentials)
+					if creds == nil {
+						creds = map[string]any{}
+					}
+					creds["sso"] = normalized
+					if updated, updErr := h.adminService.UpdateAccount(ctx, existing.ID, &service.UpdateAccountInput{
+						Credentials: creds,
+					}); updErr == nil && updated != nil {
+						backfilled = true
+						msg = "email already exists; SSO backfilled for future dedupe (account not overwritten)"
+						accountDTO = dto.AccountFromService(updated)
+						slog.Info("grok_sso_backfill", "account_id", existing.ID, "email", email)
+					} else if updErr != nil {
+						slog.Warn("grok_sso_backfill_failed", "account_id", existing.ID, "error", updErr.Error())
+					}
+				}
+			}
+			return grokSSOImportWorkerResult{
+				skipped:    true,
+				backfilled: backfilled,
+				item: GrokSSOToOAuthItemResult{
+					Index:   index,
+					Name:    existing.Name,
+					Email:   email,
+					Account: accountDTO,
+					Error:   msg,
+				},
+			}
+		}
+	}
+
 	credentials := grokSSOImportCredentials(h.grokOAuthService.BuildAccountCredentials(tokenInfo), req.Credentials)
+	// Persist original SSO for cross-pool (G2A ↔ Sub2API) dedupe; never let OAuth fields overwrite it.
+	if normalized := xai.NormalizeSSOToken(token); normalized != "" {
+		credentials["sso"] = normalized
+	}
 	name := grokSSOImportAccountName(req.Name, tokenInfo, index, total)
 	expiresAt, autoPauseOnExpired := grokSSOImportExpiry(req.ExpiresAt, req.AutoPauseOnExpired, tokenInfo)
 	account, err := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
