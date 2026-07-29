@@ -76,10 +76,22 @@ export interface GrokSSOToOAuthResponse {
 const GROK_SSO_IMPORT_CONCURRENCY = 3
 const GROK_SSO_IMPORT_TIMEOUT_PER_BATCH_MS = 90_000
 const GROK_SSO_IMPORT_TIMEOUT_BUFFER_MS = 90_000
+/** A2G backend default max_convert; full-pool convert is deferred across runs. */
+export const GROK_A2G_DEFAULT_MAX_CONVERT = 40
+/** Cap browser wait so one-shot never hangs for hours. */
+export const GROK_A2G_IMPORT_TIMEOUT_MAX_MS = 45 * 60_000
+export const GROK_A2G_IMPORT_TIMEOUT_MIN_MS = 120_000
 
 export function getGrokSSOImportTimeout(keyCount: number): number {
   const batches = Math.ceil(Math.max(1, keyCount) / GROK_SSO_IMPORT_CONCURRENCY)
   return batches * GROK_SSO_IMPORT_TIMEOUT_PER_BATCH_MS + GROK_SSO_IMPORT_TIMEOUT_BUFFER_MS
+}
+
+/** Timeout for A2G import: based on convert budget, not raw G2A pool size. */
+export function getGrokA2GImportTimeout(tokenOrConvertCount: number): number {
+  const n = Math.max(1, Math.min(Math.max(1, tokenOrConvertCount), GROK_A2G_DEFAULT_MAX_CONVERT))
+  const raw = getGrokSSOImportTimeout(n)
+  return Math.min(GROK_A2G_IMPORT_TIMEOUT_MAX_MS, Math.max(GROK_A2G_IMPORT_TIMEOUT_MIN_MS, raw))
 }
 
 export interface GrokQuotaSnapshot {

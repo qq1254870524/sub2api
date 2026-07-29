@@ -199,7 +199,7 @@ const statusTone = ref<'info' | 'success' | 'error' | ''>('')
 
 const fetchedCount = computed(() => fetchedTokens.value.length)
 const errorItems = computed(() =>
-  (result.value?.items || []).filter((item) => item.action === 'failed')
+  (result.value?.items || []).filter((item: { action: string }) => item.action === 'failed')
 )
 const statusToneClass = computed(() => {
   switch (statusTone.value) {

@@ -660,6 +660,88 @@ export async function importData(payload: {
   return data
 }
 
+
+export interface GrokA2GImportItem {
+  index: number
+  name?: string
+  email?: string
+  sso_masked?: string
+  action: 'created' | 'skipped' | 'failed' | 'deferred' | string
+  account_id?: number
+  message?: string
+  account?: unknown
+}
+
+export interface GrokA2GImportResult {
+  total: number
+  created: number
+  skipped: number
+  failed: number
+  deferred?: number
+  convert_attempted?: number
+  existing_sso_skipped?: number
+  existing_email_skipped?: number
+  backfilled_sso?: number
+  max_convert?: number
+  items?: GrokA2GImportItem[]
+  errors?: Array<{ index?: number; name?: string; message: string }>
+}
+
+export interface GrokA2GImportRequest {
+  content?: string
+  contents?: string[]
+  tokens?: string[]
+  sso_tokens?: string[]
+  /** Server-side pull: Sub2 backend fetches G2A /admin/api/tokens (avoids browser CORS) */
+  g2a_base_url?: string
+  g2a_admin_key?: string
+  name?: string
+  notes?: string | null
+  proxy_id?: number | null
+  group_ids?: number[]
+  credentials?: Record<string, unknown>
+  extra?: Record<string, unknown>
+  concurrency?: number
+  priority?: number
+  only_missing?: boolean
+  max_convert?: number
+}
+
+export interface GrokG2AFetchRequest {
+  g2a_base_url: string
+  g2a_admin_key: string
+}
+
+export interface GrokG2AFetchResult {
+  base_url_used: string
+  count: number
+  tokens: string[]
+  tried?: string[]
+}
+
+export async function fetchG2A(
+  payload: GrokG2AFetchRequest,
+  options?: { timeout?: number }
+): Promise<GrokG2AFetchResult> {
+  const { data } = await apiClient.post<GrokG2AFetchResult>(
+    '/admin/accounts/fetch/g2a',
+    payload,
+    { timeout: options?.timeout ?? 60000 }
+  )
+  return data
+}
+
+export async function importA2G(
+  payload: GrokA2GImportRequest,
+  options?: { timeout?: number }
+): Promise<GrokA2GImportResult> {
+  const { data } = await apiClient.post<GrokA2GImportResult>(
+    '/admin/accounts/import/a2g',
+    payload,
+    { timeout: options?.timeout }
+  )
+  return data
+}
 export async function importCodexSession(payload: CodexSessionImportRequest): Promise<CodexSessionImportResult> {
   const { data } = await apiClient.post<CodexSessionImportResult>('/admin/accounts/import/codex-session', payload, {
     timeout: 120000 // 120s timeout for large session imports
@@ -965,6 +1047,8 @@ export const accountsAPI = {
   syncFromCrs,
   exportData,
   importData,
+  importA2G,
+  fetchG2A,
   importCodexSession,
   createOpenAICodexPAT,
   getAntigravityDefaultModelMapping,
