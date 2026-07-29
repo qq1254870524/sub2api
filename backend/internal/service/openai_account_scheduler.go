@@ -1,4 +1,4 @@
-﻿package service
+package service
 
 import (
 	"container/heap"
@@ -1691,13 +1691,6 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 			reason += "_" + decision.window
 		}
 		return false, reason
-	}
-	// Grok uses the same scheduler path as OpenAI-compatible traffic. Skip accounts
-	// whose latest model-endpoint snapshot is rate-limited / exhausted, otherwise the
-	// candidate TopK is dominated by hot 429 accounts and clients see
-	// "exceeded retry limit ... 429".
-	if paused, _ := shouldAutoPauseGrokAccountByQuota(account); paused {
-		return false, "grok_quota_auto_pause"
 	}
 	// 母账号健康联动：影子账号的凭据来自母账号，母账号不可调度时影子也不应被选中。
 	// Parent-health gate: shadow borrows the parent's credentials; an unschedulable

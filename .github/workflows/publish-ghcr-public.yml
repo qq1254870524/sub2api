@@ -32,12 +32,13 @@ jobs:
           push: true
           tags: |
             ghcr.io/qq1254870524/sub2api:latest
-            ghcr.io/qq1254870524/sub2api:stable-2026-07-29-upstream-166-full-pool
-            ghcr.io/qq1254870524/sub2api:0.1.169-upstream-166-full-pool
-            ghcr.io/qq1254870524/sub2api:upstream-v0.1.166-full-pool
+            ghcr.io/qq1254870524/sub2api:stable-2026-07-29-upstream-168-full-pool
+            ghcr.io/qq1254870524/sub2api:0.1.170-upstream-168-full-pool
+            ghcr.io/qq1254870524/sub2api:upstream-v0.1.168-full-pool
           labels: |
             org.opencontainers.image.source=https://github.com/qq1254870524/sub2api
-            org.opencontainers.image.version=0.1.169-upstream-166-full-pool
-            org.opencontainers.image.description=Fork upstream v0.1.166 + CPA/A2G/peer G2A + full-pool failover
+            org.opencontainers.image.version=0.1.170-upstream-168-full-pool
+            org.opencontainers.image.description=Fork upstream v0.1.168 + CPA/A2G/peer G2A + full-pool failover
           cache-from: type=gha
           cache-to: type=gha,mode=max
+

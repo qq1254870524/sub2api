@@ -942,7 +942,6 @@ func TestFailoverClientGone(t *testing.T) {
 	})
 }
 
-
 func TestAccountSwitchesExhaustedUnlimited(t *testing.T) {
 	require.False(t, AccountSwitchesExhausted(0, 0))
 	require.False(t, AccountSwitchesExhausted(0, 5))

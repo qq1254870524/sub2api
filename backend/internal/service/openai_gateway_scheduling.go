@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"log/slog"
 	"sort"
 	"strconv"
@@ -321,13 +320,6 @@ func shouldAutoPauseGrokAccountByQuota(account *Account) (bool, openAIQuotaAutoP
 	now := time.Now()
 	if grokQuotaSnapshotStaleForPause(snapshot, now) {
 		return false, openAIQuotaAutoPauseDecision{}
-	}
-	// Fresh model-endpoint 429 is authoritative even when xAI omits remaining
-	// windows / Retry-After. Billing may still look healthy while chat/responses
-	// rejects traffic; keep these accounts out of the scheduling pool until a
-	// newer non-429 snapshot replaces them or the observation goes stale.
-	if snapshot.StatusCode == http.StatusTooManyRequests {
-		return true, openAIQuotaAutoPauseDecision{window: "status_429", threshold: 1, utilization: 1}
 	}
 	if grokQuotaRetryAfterActive(snapshot, now) {
 		return true, openAIQuotaAutoPauseDecision{window: "retry_after", threshold: 1, utilization: 1}

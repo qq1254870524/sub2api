@@ -1101,10 +1101,6 @@ func (h *AccountHandler) Test(c *gin.Context) {
 			_ = c.Error(err)
 		}
 	}
-	// Drop stale forbidden/usage badges after a proven-good connection test.
-	if h.accountUsageService != nil {
-		h.accountUsageService.InvalidateAccountUsageCache(accountID)
-	}
 }
 
 // RecoverState handles unified recovery of recoverable account runtime state.
@@ -1132,9 +1128,6 @@ func (h *AccountHandler) RecoverState(c *gin.Context) {
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
-	}
-	if h.accountUsageService != nil {
-		h.accountUsageService.InvalidateAccountUsageCache(accountID)
 	}
 
 	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
@@ -1519,10 +1512,6 @@ func (h *AccountHandler) ClearError(c *gin.Context) {
 			log.Printf("[WARN] Failed to invalidate token cache for account %d: %v", accountID, invalidateErr)
 		}
 	}
-	// Drop sticky usage/forbidden badges after admin clears error.
-	if h.accountUsageService != nil {
-		h.accountUsageService.InvalidateAccountUsageCache(accountID)
-	}
 
 	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
 }
@@ -1600,10 +1589,6 @@ func (h *AccountHandler) BatchClearError(c *gin.Context) {
 	if err := g.Wait(); err != nil {
 		response.ErrorFrom(c, err)
 		return
-	}
-
-	if h.accountUsageService != nil {
-		h.accountUsageService.InvalidateAccountUsageCaches(req.AccountIDs)
 	}
 
 	response.Success(c, gin.H{

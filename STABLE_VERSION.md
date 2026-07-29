@@ -1,7 +1,7 @@
-# Stable version
+﻿# STABLE_VERSION
 
-- Package/tag: `stable-2026-07-29-upstream-166-full-pool`
-- Fork VERSION: `0.1.169-upstream-166-full-pool`
-- Upstream baseline: Wei-Shaw/sub2api `v0.1.166` (server VERSION `0.1.166`)
-- Preserved: CPA import, A2G bridge, Peer G2A, full-pool failover, compose concurrency wiring
-- Live process: not restarted by this release packaging
+- fork: 0.1.170-upstream-168-full-pool
+- upstream: v0.1.168
+- release-tag intent: stable-2026-07-29-upstream-168-full-pool
+- image: local/sub2api:upstream-168-full-pool
+- kept: CPA/A2G/peer G2A/full-pool failover

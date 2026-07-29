@@ -630,18 +630,15 @@ import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber, formatRelativeTime } from '@/utils/format'
-import {
-  USAGE_CACHE_TTL,
-  deleteCachedAccountUsage,
-  getCachedAccountUsage,
-  setCachedAccountUsage
-} from '@/utils/accountUsageCache'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
 import OllamaCloudUsageCell from './OllamaCloudUsageCell.vue'
 
+// Module-level cache shared across all AccountUsageCell instances
+const _usageCache = new Map<number, { data: AccountUsageInfo; ts: number }>()
+const USAGE_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
 const props = withDefaults(
   defineProps<{
@@ -1270,7 +1267,7 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
 
   // Check cache
   if (!options?.bypassCache) {
-    const cached = getCachedAccountUsage(props.account.id)
+    const cached = _usageCache.get(props.account.id)
     if (cached && Date.now() - cached.ts < USAGE_CACHE_TTL) {
       usageInfo.value = cached.data
       loading.value = false
@@ -1282,16 +1279,13 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
   error.value = null
 
   try {
-    // When bypassing frontend cache (manual refresh / post-test), also force backend
-    // so sticky forbidden/usage probe caches are not reused.
-    const force = !!options?.bypassCache
     const fetchFn = () => options?.source
-      ? adminAPI.accounts.getUsage(props.account.id, options.source, force)
-      : adminAPI.accounts.getUsage(props.account.id, undefined, force)
+      ? adminAPI.accounts.getUsage(props.account.id, options.source)
+      : adminAPI.accounts.getUsage(props.account.id)
     const result = await enqueueUsageRequest(props.account, fetchFn)
     if (!unmounted.value) {
       usageInfo.value = result
-      setCachedAccountUsage(props.account.id, result)
+      _usageCache.set(props.account.id, { data: result, ts: Date.now() })
     }
   } catch (e: any) {
     if (!unmounted.value) {
@@ -1411,7 +1405,7 @@ const handleGrokProbed = (result: GrokQuotaProbeResult) => {
     error_code: result.billing || snapshot ? undefined : current.error_code
   }
   usageInfo.value = merged
-  setCachedAccountUsage(props.account.id, merged)
+  _usageCache.set(props.account.id, { data: merged, ts: Date.now() })
 }
 
 // ===== API Key quota progress bars =====
@@ -1524,7 +1518,7 @@ watch(openAIUsageRefreshKey, (nextKey, prevKey) => {
   if (!prevKey || nextKey === prevKey) return
   if (props.account.platform !== 'openai' || props.account.type !== 'oauth') return
 
-  deleteCachedAccountUsage(props.account.id)
+  _usageCache.delete(props.account.id)
   requestAutoLoad()
 })
 
@@ -1535,7 +1529,7 @@ watch(
     if (!shouldFetchUsage.value) return
 
     const source = isAnthropicOAuthOrSetupToken.value ? 'passive' : undefined
-    deleteCachedAccountUsage(props.account.id)
+    _usageCache.delete(props.account.id)
     loadUsage({ source, bypassCache: true }).catch((e) => {
       console.error('Failed to refresh usage after manual refresh:', e)
     })

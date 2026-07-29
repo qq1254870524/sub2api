@@ -3,8 +3,7 @@
  * Handles AI platform account management for administrators
  */
 
-import { apiClient, buildApiUrl } from '../client'
-import { ADMIN_UI_REQUEST_HEADER } from '../adminUIRequest'
+import { apiClient } from '../client'
 import type {
   Account,
   CreateAccountRequest,
@@ -244,103 +243,6 @@ export async function testAccount(id: number): Promise<{
     latency_ms?: number
   }>(`/admin/accounts/${id}/test`)
   return data
-}
-
-export interface AccountTestStreamResult {
-  success: boolean
-  message: string
-}
-
-/**
- * Test account connectivity via SSE stream (same as AccountTestModal).
- * Empty model_id lets the backend pick platform default test models.
- * Waits until the HTTP stream fully ends so server-side recover/invalidate has run.
- */
-export async function testAccountStream(
-  id: number,
-  options?: {
-    modelId?: string
-    prompt?: string
-    mode?: 'default' | 'compact'
-    signal?: AbortSignal
-  }
-): Promise<AccountTestStreamResult> {
-  const url = buildApiUrl(`/admin/accounts/${id}/test`)
-  const body: Record<string, string> = {
-    model_id: options?.modelId || '',
-    prompt: options?.prompt || ''
-  }
-  if (options?.mode) {
-    body.mode = options.mode
-  }
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem('auth_token') || ''}`,
-      'Content-Type': 'application/json',
-      [ADMIN_UI_REQUEST_HEADER]: '1'
-    },
-    body: JSON.stringify(body),
-    signal: options?.signal
-  })
-
-  if (!response.ok) {
-    return { success: false, message: `HTTP ${response.status}` }
-  }
-
-  const reader = response.body?.getReader()
-  if (!reader) {
-    return { success: false, message: 'No response body' }
-  }
-
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let success = false
-  let lastError = ''
-  let sawComplete = false
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() || ''
-
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue
-      const jsonStr = line.slice(6).trim()
-      if (!jsonStr) continue
-      try {
-        const event = JSON.parse(jsonStr) as {
-          type?: string
-          success?: boolean
-          error?: string
-        }
-        if (event.type === 'test_complete') {
-          sawComplete = true
-          success = !!event.success
-          if (!success) {
-            lastError = event.error || 'Test failed'
-          }
-        } else if (event.type === 'error') {
-          success = false
-          lastError = event.error || 'Unknown error'
-        }
-      } catch {
-        // ignore malformed SSE chunks
-      }
-    }
-  }
-
-  if (success) {
-    return { success: true, message: 'ok' }
-  }
-  return {
-    success: false,
-    message: lastError || (sawComplete ? 'Test failed' : 'No test result')
-  }
 }
 
 /**
@@ -758,88 +660,6 @@ export async function importData(payload: {
   return data
 }
 
-
-export interface GrokA2GImportItem {
-  index: number
-  name?: string
-  email?: string
-  sso_masked?: string
-  action: 'created' | 'skipped' | 'failed' | 'deferred' | string
-  account_id?: number
-  message?: string
-  account?: unknown
-}
-
-export interface GrokA2GImportResult {
-  total: number
-  created: number
-  skipped: number
-  failed: number
-  deferred?: number
-  convert_attempted?: number
-  existing_sso_skipped?: number
-  existing_email_skipped?: number
-  backfilled_sso?: number
-  max_convert?: number
-  items?: GrokA2GImportItem[]
-  errors?: Array<{ index?: number; name?: string; message: string }>
-}
-
-export interface GrokA2GImportRequest {
-  content?: string
-  contents?: string[]
-  tokens?: string[]
-  sso_tokens?: string[]
-  /** Server-side pull: Sub2 backend fetches G2A /admin/api/tokens (avoids browser CORS) */
-  g2a_base_url?: string
-  g2a_admin_key?: string
-  name?: string
-  notes?: string | null
-  proxy_id?: number | null
-  group_ids?: number[]
-  credentials?: Record<string, unknown>
-  extra?: Record<string, unknown>
-  concurrency?: number
-  priority?: number
-  only_missing?: boolean
-  max_convert?: number
-}
-
-export interface GrokG2AFetchRequest {
-  g2a_base_url: string
-  g2a_admin_key: string
-}
-
-export interface GrokG2AFetchResult {
-  base_url_used: string
-  count: number
-  tokens: string[]
-  tried?: string[]
-}
-
-export async function fetchG2A(
-  payload: GrokG2AFetchRequest,
-  options?: { timeout?: number }
-): Promise<GrokG2AFetchResult> {
-  const { data } = await apiClient.post<GrokG2AFetchResult>(
-    '/admin/accounts/fetch/g2a',
-    payload,
-    { timeout: options?.timeout ?? 60000 }
-  )
-  return data
-}
-
-export async function importA2G(
-  payload: GrokA2GImportRequest,
-  options?: { timeout?: number }
-): Promise<GrokA2GImportResult> {
-  const { data } = await apiClient.post<GrokA2GImportResult>(
-    '/admin/accounts/import/a2g',
-    payload,
-    { timeout: options?.timeout }
-  )
-  return data
-}
 export async function importCodexSession(payload: CodexSessionImportRequest): Promise<CodexSessionImportResult> {
   const { data } = await apiClient.post<CodexSessionImportResult>('/admin/accounts/import/codex-session', payload, {
     timeout: 120000 // 120s timeout for large session imports
@@ -1119,7 +939,6 @@ export const accountsAPI = {
   delete: deleteAccount,
   toggleStatus,
   testAccount,
-  testAccountStream,
   refreshCredentials,
   applyOAuthCredentials,
   getStats,
@@ -1146,8 +965,6 @@ export const accountsAPI = {
   syncFromCrs,
   exportData,
   importData,
-  importA2G,
-  fetchG2A,
   importCodexSession,
   createOpenAICodexPAT,
   getAntigravityDefaultModelMapping,

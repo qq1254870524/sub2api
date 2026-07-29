@@ -274,7 +274,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void
-  (e: 'tested', payload: { accountId: number; success: boolean }): void
 }>()
 
 const terminalRef = ref<HTMLElement | null>(null)
@@ -480,14 +479,6 @@ const startTest = async () => {
           }
         }
       }
-    }
-    // Emit only after the HTTP stream fully ends so the server has finished
-    // RecoverAccountAfterSuccessfulTest + InvalidateAccountUsageCache.
-    // Cast through string: vue-tsc narrows status to "connecting" after the
-    // assignment at the start of startTest, even though handleEvent mutates it.
-    const finalStatus = status.value as string
-    if (props.account && (finalStatus === 'success' || finalStatus === 'error')) {
-      emit('tested', { accountId: props.account.id, success: finalStatus === 'success' })
     }
   } catch (error: unknown) {
     if (error instanceof DOMException && error.name === 'AbortError') {

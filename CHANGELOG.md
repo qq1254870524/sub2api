@@ -1,3 +1,18 @@
+﻿## 0.1.170-upstream-168-full-pool (2026-07-29)
+
+### Upstream
+- Merged Wei-Shaw/sub2api **v0.1.168** (Passkey, Model Plaza, Kimi K3, SKIP_SETUP, Codex/Live resilience, security/cache fixes).
+
+### Kept local
+- CPA/A2G import + G2A fetch/export admin routes
+- Peer G2A exhausted failover
+- Full-pool `max_account_switches=0` + `AccountSwitchesExhausted` unlimited semantics
+- Public GHCR publish tags for this fork
+
+### Deploy
+- Image tag: `local/sub2api:upstream-168-full-pool`
+- Release tag: `stable-2026-07-29-upstream-168-full-pool`
+
 ## 0.1.169-upstream-166-full-pool (2026-07-29)
 
 ### Upstream
@@ -243,4 +258,5 @@
 ### Base
 - Merged upstream Wei-Shaw/sub2api **v0.1.160**.
 - Preserved CPA import + Grok 429 multi-failover (budget 10).
+
 

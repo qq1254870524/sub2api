@@ -73,6 +73,22 @@ server:
     max_upload_buffer_per_stream: 524288
 
 # =============================================================================
+# WebAuthn / Passkey Configuration
+# WebAuthn / Passkey 配置
+# =============================================================================
+# Passkeys require HTTPS in production. The RP ID is the domain only (no scheme
+# or port), while RP origins are exact browser origins.
+# Passkey 在生产环境要求 HTTPS。RP ID 只填写域名（不含协议和端口），RP origins
+# 填写浏览器访问使用的完整 Origin。
+webauthn:
+  enabled: false
+  rp_display_name: "Sub2API"
+  # Example / 示例: "sub2api.example.com"
+  rp_id: ""
+  # Example / 示例: ["https://sub2api.example.com"]
+  rp_origins: []
+
+# =============================================================================
 # Run Mode Configuration
 # 运行模式配置
 # =============================================================================
@@ -127,6 +143,8 @@ security:
       - "api.openai.com"
       - "api.anthropic.com"
       - "api.kimi.com"
+      - "api.moonshot.ai"
+      - "api.moonshot.cn"
       - "open.bigmodel.cn"
       - "api.minimaxi.com"
       - "generativelanguage.googleapis.com"
@@ -183,16 +201,6 @@ gateway:
   # Timeout for waiting upstream response headers (seconds)
   # 等待上游响应头超时时间（秒）
   response_header_timeout: 600
-  # Max account switches per request on upstream failure.
-  # 上游失败时单次请求最多切换账号次数。
-  # 0 (default) = unlimited: try every available account in the pool once until success or pool exhausted.
-  # 0（默认）= 不限制：失败就继续切号，直到成功或号池无可选账号（适合 800+ 大号池）。
-  # Set a positive number only if you want to hard-cap switch attempts (e.g. 5/10).
-  # 仅在需要硬顶时设为正数（例如 5/10），否则大号池会被人为截断。
-  max_account_switches: 0
-  # Gemini/Antigravity switch cap; 0 = unlimited (same semantics).
-  # Gemini/Antigravity 切换上限；0 = 不限制。
-  max_account_switches_gemini: 0
   # OpenAI/Codex upstream response header timeout (seconds, 0=disabled)
   # OpenAI/Codex 等待上游响应头超时时间（秒，0=禁用本地响应头超时）
   openai_response_header_timeout: 0
