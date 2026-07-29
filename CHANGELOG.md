@@ -1,3 +1,36 @@
+## 0.1.169-upstream-166-full-pool (2026-07-29)
+
+### Upstream
+- Merge [Wei-Shaw/sub2api v0.1.166](https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.166) (content baseline; server VERSION synced to 0.1.166)
+- Highlights absorbed from upstream:
+  - Panel API rate limiting (auth by user, public by real IP) to protect DB
+  - WebSocket multi-turn billing by actual model per turn
+  - Model-mapping usage statistics keep final upstream model
+  - Antigravity OpenAI compat hardening; reject usage-only empty non-stream responses
+  - Codex Responses ↔ Anthropic protocol tool-call pairing compatibility
+  - Claude Code CLI spoof version → 2.1.220; third-party proxy Claude Code recognition/cache
+  - Caddy SSE compression buffer disabled (stream stall fix)
+  - Grok manual test 402 payment-fail now pauses account
+  - Gemini pool-mode retryable errors auto-retry; Gemini 3.6 Flash pricing; Hermes web-search decls
+  - Settings partial-update no longer clobbers unsubmitted fields
+  - Composite group prefix route model passthrough; CONFIG_FILE path fix
+  - Payment dashboard multi-currency grouping; admin usage request-id / route-user filters
+  - Security deps / image processing / telemetry bumps; mobile available-channels UI
+
+### Keep fork customizations
+- CPA/CLIProxy xai OAuth import: `POST /api/v1/admin/accounts/import/grok-cpa` + Import Data UI
+- A2G import / server-side G2A fetch / export g2a-sso / Peer G2A runtime forward
+- A2G dedupe + max_convert + SSO backfill (fix UI hang)
+- Full-pool failover: `max_account_switches=0` (800+ accounts no hard cap)
+- Grok OAuth 429 switch budget aligned to `gateway.max_account_switches` (0=full pool)
+- Compose concurrency env wiring (H2C/pool/scheduling/body) + full-pool env defaults
+
+### Process safety
+- Source/update/package/release only; **do not stop** live Sub2API on :8080
+
+### Version markers
+- VERSION: `0.1.169-upstream-166-full-pool`
+- backend/cmd/server/VERSION: `0.1.166` (upstream baseline)
 ## 0.1.168-upstream-165-full-pool (2026-07-26)
 
 ### Upstream
