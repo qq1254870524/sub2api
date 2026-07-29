@@ -1,0 +1,966 @@
+package admin
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
+	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/gin-gonic/gin"
+)
+
+// Default max SSO→OAuth conversions per A2G import request.
+// Historical Sub2 rows often lack credentials.sso, so email-level skip only
+// happens AFTER ConvertFromSSO; without a cap a full pool (300+) can run hours.
+const defaultGrokA2GMaxConvert = 40
+
+// GrokA2GImportRequest imports Grok2API (G2A) account-pool export into Sub2API.
+// Supported payloads:
+//   - plain text: one SSO token per line
+//   - Grok2API JSON: { "basic": ["token"|{token,tags}], "super": [...], ... }
+//   - JSON array of tokens / objects with token|sso|sso_token
+//   - { "tokens": [...] } / { "content": "..." }
+//
+// Never overwrites existing accounts that already carry the same SSO or email.
+type GrokA2GImportRequest struct {
+	Content   string   `json:"content"`
+	Contents  []string `json:"contents"`
+	Tokens    []string `json:"tokens"`
+	SSOTokens []string `json:"sso_tokens"`
+	// Server-side direct bridge (Sub2 backend pulls G2A; avoids browser CORS / Failed to fetch)
+	G2ABaseURL         string         `json:"g2a_base_url"`
+	G2AAdminKey        string         `json:"g2a_admin_key"`
+	Name               string         `json:"name"`
+	Notes              *string        `json:"notes"`
+	ProxyID            *int64         `json:"proxy_id"`
+	GroupIDs           []int64        `json:"group_ids"`
+	Credentials        map[string]any `json:"credentials"`
+	Extra              map[string]any `json:"extra"`
+	Concurrency        int            `json:"concurrency"`
+	LoadFactor         *int           `json:"load_factor"`
+	Priority           int            `json:"priority"`
+	RateMultiplier     *float64       `json:"rate_multiplier"`
+	ExpiresAt          *int64         `json:"expires_at"`
+	AutoPauseOnExpired *bool          `json:"auto_pause_on_expired"`
+	// OnlyMissing keeps semantics explicit for clients: skip existing SSO first.
+	// Email conflicts are still skipped after convert (G2A list has no emails).
+	OnlyMissing *bool `json:"only_missing"`
+	// MaxConvert limits how many tokens go through SSO→OAuth this request.
+	// 0 = default (40). Negative = unlimited (not recommended for full-pool).
+	MaxConvert *int `json:"max_convert"`
+}
+
+// GrokG2AFetchRequest is a lightweight probe/pull of G2A account pool via Sub2 backend.
+type GrokG2AFetchRequest struct {
+	G2ABaseURL  string `json:"g2a_base_url"`
+	G2AAdminKey string `json:"g2a_admin_key"`
+}
+
+// GrokG2AFetchResult returns SSO tokens pulled from G2A without importing.
+type GrokG2AFetchResult struct {
+	BaseURLUsed string   `json:"base_url_used"`
+	Count       int      `json:"count"`
+	Tokens      []string `json:"tokens"`
+	Tried       []string `json:"tried,omitempty"`
+}
+
+type GrokA2GImportResult struct {
+	Total            int                    `json:"total"`
+	Created          int                    `json:"created"`
+	Skipped          int                    `json:"skipped"`
+	Failed           int                    `json:"failed"`
+	Deferred         int                    `json:"deferred,omitempty"`
+	ConvertAttempted int                    `json:"convert_attempted,omitempty"`
+	ExistingSSO      int                    `json:"existing_sso_skipped,omitempty"`
+	ExistingEmail    int                    `json:"existing_email_skipped,omitempty"`
+	BackfilledSSO    int                    `json:"backfilled_sso,omitempty"`
+	MaxConvert       int                    `json:"max_convert,omitempty"`
+	Items            []GrokA2GImportItem    `json:"items,omitempty"`
+	Errors           []GrokA2GImportMessage `json:"errors,omitempty"`
+}
+
+type GrokA2GImportItem struct {
+	Index     int          `json:"index"`
+	Name      string       `json:"name,omitempty"`
+	Email     string       `json:"email,omitempty"`
+	SSOMasked string       `json:"sso_masked,omitempty"`
+	Action    string       `json:"action"` // created | skipped | failed | deferred
+	AccountID int64        `json:"account_id,omitempty"`
+	Message   string       `json:"message,omitempty"`
+	Account   *dto.Account `json:"account,omitempty"`
+}
+
+type GrokA2GImportMessage struct {
+	Index   int    `json:"index,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Message string `json:"message"`
+}
+
+// GrokG2ASSOExportItem is one Grok account row exposed for G2A reverse import.
+type GrokG2ASSOExportItem struct {
+	AccountID int64  `json:"account_id"`
+	Name      string `json:"name,omitempty"`
+	Email     string `json:"email,omitempty"`
+	SSO       string `json:"sso,omitempty"`
+	SSOMasked string `json:"sso_masked,omitempty"`
+	HasSSO    bool   `json:"has_sso"`
+	Status    string `json:"status,omitempty"`
+}
+
+// GrokG2ASSOExportResult is a lightweight SSO export for Grok2API bridge import.
+// Only admin auth is required (no step-up). Sensitive values are returned because
+// the caller is already an authenticated admin performing pool bridging.
+type GrokG2ASSOExportResult struct {
+	Platform   string                 `json:"platform"`
+	Total      int                    `json:"total"`
+	WithSSO    int                    `json:"with_sso"`
+	WithoutSSO int                    `json:"without_sso"`
+	Tokens     []string               `json:"tokens"`
+	Items      []GrokG2ASSOExportItem `json:"items,omitempty"`
+}
+
+// ImportA2G imports Grok2API pool SSO tokens into Sub2API Grok OAuth accounts.
+// POST /api/v1/admin/accounts/import/a2g
+func (h *GrokOAuthHandler) ImportA2G(c *gin.Context) {
+	var req GrokA2GImportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
+	// Prefer server-side pull when URL+Admin Key provided (avoids browser CORS / downtime race).
+	if strings.TrimSpace(req.G2ABaseURL) != "" && strings.TrimSpace(req.G2AAdminKey) != "" {
+		pulled, used, tried, err := fetchSSOTokensFromG2A(c.Request.Context(), req.G2ABaseURL, req.G2AAdminKey)
+		if err != nil {
+			response.BadRequest(c, fmt.Sprintf(
+				"从 G2A 服务端拉取失败: %v（已尝试: %s）。Admin Key 必须是 app_key（管理后台登录密钥），不是 api_key。若 G2A 在 Windows 本机而 Sub2 在 Docker，请用 http://172.24.80.1:8010 或 host 可达地址。",
+				err, strings.Join(tried, ", "),
+			))
+			return
+		}
+		if len(pulled) == 0 {
+			response.BadRequest(c, fmt.Sprintf("G2A 号池为空（%s）", used))
+			return
+		}
+		req.Tokens = append(req.Tokens, pulled...)
+		slog.Info("grok_a2g_server_pull", "base_url_used", used, "count", len(pulled), "tried", tried)
+	}
+
+	tokens, parseErrs := parseGrokA2GTokens(req)
+	if len(tokens) == 0 {
+		msg := "请提供 Grok2API SSO（填写 G2A 地址+Admin Key 由服务端拉取、或 txt 每行一个 SSO、或 G2A JSON {pool:[tokens]}）"
+		if len(parseErrs) > 0 {
+			msg = msg + "；" + strings.Join(parseErrs, "; ")
+		}
+		response.BadRequest(c, msg)
+		return
+	}
+
+	ctx := c.Request.Context()
+	existingSSO, existingEmail, err := h.listExistingGrokIdentitySets(ctx)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	maxConvert := defaultGrokA2GMaxConvert
+	if req.MaxConvert != nil {
+		maxConvert = *req.MaxConvert
+	}
+	// Negative means unlimited; keep result.MaxConvert as requested for clients.
+	resultMaxConvert := maxConvert
+	if maxConvert < 0 {
+		resultMaxConvert = -1
+	}
+
+	result := GrokA2GImportResult{
+		Total:      len(tokens),
+		Items:      make([]GrokA2GImportItem, 0, len(tokens)),
+		MaxConvert: resultMaxConvert,
+	}
+
+	// Pre-filter: SSO already in Sub2 → never convert / never overwrite.
+	// G2A /admin/api/tokens has no emails, so email skip happens after convert
+	// (and backfills SSO so subsequent imports pre-filter by SSO).
+	toImport := make([]string, 0, len(tokens))
+	deferredTokens := make(map[string]struct{})
+	for i, token := range tokens {
+		masked := maskSSOToken(token)
+		if _, exists := existingSSO[token]; exists {
+			result.Skipped++
+			result.ExistingSSO++
+			result.Items = append(result.Items, GrokA2GImportItem{
+				Index:     i + 1,
+				SSOMasked: masked,
+				Action:    "skipped",
+				Message:   "SSO already exists in Sub2API; not overwritten",
+			})
+			continue
+		}
+		// Cap expensive SSO→OAuth work so the HTTP request finishes.
+		if maxConvert >= 0 && len(toImport) >= maxConvert {
+			result.Deferred++
+			deferredTokens[token] = struct{}{}
+			result.Items = append(result.Items, GrokA2GImportItem{
+				Index:     i + 1,
+				SSOMasked: masked,
+				Action:    "deferred",
+				Message:   fmt.Sprintf("deferred: max_convert=%d reached; re-run A2G import to continue missing-only convert", maxConvert),
+			})
+			continue
+		}
+		// mark as reserved for batch-local SSO dedupe
+		existingSSO[token] = struct{}{}
+		toImport = append(toImport, token)
+	}
+
+	result.ConvertAttempted = len(toImport)
+	slog.Info("grok_a2g_import_plan",
+		"total", result.Total,
+		"existing_sso", result.ExistingSSO,
+		"to_convert", len(toImport),
+		"deferred", result.Deferred,
+		"max_convert", resultMaxConvert,
+		"existing_email_known", len(existingEmail),
+	)
+
+	if len(toImport) == 0 {
+		// Count deferred into skipped for legacy UI that only shows created/skipped/failed.
+		result.Skipped += result.Deferred
+		slog.Info("grok_a2g_import_done",
+			"total", result.Total,
+			"created", result.Created,
+			"skipped", result.Skipped,
+			"failed", result.Failed,
+			"deferred", result.Deferred,
+			"convert_attempted", 0,
+		)
+		response.Success(c, result)
+		return
+	}
+
+	ssoReq := GrokSSOToOAuthRequest{
+		SSOTokens:          toImport,
+		Name:               req.Name,
+		Notes:              req.Notes,
+		ProxyID:            req.ProxyID,
+		GroupIDs:           append([]int64(nil), req.GroupIDs...),
+		Credentials:        cloneGrokSSOMap(req.Credentials),
+		Extra:              cloneGrokSSOMap(req.Extra),
+		Concurrency:        req.Concurrency,
+		LoadFactor:         req.LoadFactor,
+		Priority:           req.Priority,
+		RateMultiplier:     req.RateMultiplier,
+		ExpiresAt:          req.ExpiresAt,
+		AutoPauseOnExpired: req.AutoPauseOnExpired,
+	}
+
+	workerCount := grokSSOImportConcurrency
+	if len(toImport) < workerCount {
+		workerCount = len(toImport)
+	}
+	jobs := make(chan grokSSOImportJob)
+	items := make([]grokSSOImportWorkerResult, len(toImport))
+	var progressMu sync.Mutex
+	var progressDone int
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				wr := h.safeCreateAccountFromSSOToken(ctx, ssoReq, job.token, job.index+1, len(toImport))
+				// Batch-local email reservation after convert (covers concurrent workers).
+				if email := normalizeGrokEmail(wr.item.Email); email != "" {
+					progressMu.Lock()
+					if _, seen := existingEmail[email]; seen && wr.created {
+						// Another worker already claimed this email; treat as skip if create raced.
+						// createAccountFromSSOToken already DB-checks; this is defense in depth.
+					}
+					existingEmail[email] = struct{}{}
+					progressMu.Unlock()
+				}
+				items[job.index] = wr
+				progressMu.Lock()
+				progressDone++
+				done := progressDone
+				progressMu.Unlock()
+				if done == 1 || done == len(toImport) || done%5 == 0 {
+					slog.Info("grok_a2g_import_progress",
+						"done", done,
+						"total_convert", len(toImport),
+						"created_flag", wr.created,
+						"skipped_flag", wr.skipped,
+					)
+				}
+			}
+		}()
+	}
+	for i, token := range toImport {
+		jobs <- grokSSOImportJob{index: i, token: token}
+	}
+	close(jobs)
+	wg.Wait()
+
+	// Map worker results; index offset is relative to toImport, remap to original token order.
+	importIndexByToken := make(map[string]int, len(toImport))
+	for i, token := range toImport {
+		importIndexByToken[token] = i
+	}
+	// rebuild items ordered by original tokens list for stable UX
+	result.Items = result.Items[:0]
+	for i, token := range tokens {
+		masked := maskSSOToken(token)
+		// was skipped earlier by SSO?
+		if wi, ok := importIndexByToken[token]; ok {
+			wr := items[wi]
+			if wr.skipped {
+				result.Skipped++
+				if strings.Contains(strings.ToLower(wr.item.Error), "email") {
+					result.ExistingEmail++
+				}
+				if wr.backfilled {
+					result.BackfilledSSO++
+				}
+				result.Items = append(result.Items, GrokA2GImportItem{
+					Index:     i + 1,
+					Name:      wr.item.Name,
+					Email:     wr.item.Email,
+					SSOMasked: masked,
+					Action:    "skipped",
+					Message:   firstNonEmptyA2G(wr.item.Error, "email already exists in Sub2API; not overwritten"),
+					AccountID: accountIDFromDTO(wr.item.Account),
+					Account:   wr.item.Account,
+				})
+			} else if wr.created {
+				result.Created++
+				item := GrokA2GImportItem{
+					Index:     i + 1,
+					Name:      wr.item.Name,
+					Email:     wr.item.Email,
+					SSOMasked: masked,
+					Action:    "created",
+					Account:   wr.item.Account,
+				}
+				if wr.item.Account != nil {
+					item.AccountID = wr.item.Account.ID
+				}
+				result.Items = append(result.Items, item)
+			} else {
+				result.Failed++
+				msg := wr.item.Error
+				if msg == "" {
+					msg = "import failed"
+				}
+				result.Items = append(result.Items, GrokA2GImportItem{
+					Index:     i + 1,
+					Name:      wr.item.Name,
+					Email:     wr.item.Email,
+					SSOMasked: masked,
+					Action:    "failed",
+					Message:   msg,
+				})
+				result.Errors = append(result.Errors, GrokA2GImportMessage{
+					Index:   i + 1,
+					Name:    wr.item.Name,
+					Message: msg,
+				})
+				// free reservation so a later retry can attempt again
+				delete(existingSSO, token)
+			}
+			continue
+		}
+		if _, def := deferredTokens[token]; def {
+			result.Items = append(result.Items, GrokA2GImportItem{
+				Index:     i + 1,
+				SSOMasked: masked,
+				Action:    "deferred",
+				Message:   fmt.Sprintf("deferred: max_convert=%d reached; re-run A2G import to continue missing-only convert", maxConvert),
+			})
+			continue
+		}
+		result.Items = append(result.Items, GrokA2GImportItem{
+			Index:     i + 1,
+			SSOMasked: masked,
+			Action:    "skipped",
+			Message:   "SSO already exists in Sub2API; not overwritten",
+		})
+	}
+
+	// Fold deferred into skipped for clients that only sum created+skipped+failed.
+	result.Skipped += result.Deferred
+
+	slog.Info("grok_a2g_import_done",
+		"total", result.Total,
+		"created", result.Created,
+		"skipped", result.Skipped,
+		"failed", result.Failed,
+		"deferred", result.Deferred,
+		"convert_attempted", result.ConvertAttempted,
+		"existing_sso", result.ExistingSSO,
+		"existing_email", result.ExistingEmail,
+		"backfilled_sso", result.BackfilledSSO,
+		"max_convert", resultMaxConvert,
+	)
+	response.Success(c, result)
+}
+
+// ExportG2ASSO exports Grok account SSO tokens for Grok2API reverse import.
+// GET /api/v1/admin/accounts/export/g2a-sso
+func (h *GrokOAuthHandler) ExportG2ASSO(c *gin.Context) {
+	ctx := c.Request.Context()
+	page := 1
+	pageSize := dataPageCap
+	result := GrokG2ASSOExportResult{
+		Platform: service.PlatformGrok,
+		Tokens:   make([]string, 0, 64),
+		Items:    make([]GrokG2ASSOExportItem, 0, 64),
+	}
+	seenSSO := make(map[string]struct{})
+
+	for {
+		items, total, err := h.adminService.ListAccounts(ctx, page, pageSize, service.PlatformGrok, "", "", "", 0, "", "created_at", "desc")
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+		for i := range items {
+			acc := items[i]
+			email := firstNonEmptyA2G(
+				normalizeGrokEmail(acc.GetCredential("email")),
+				normalizeGrokEmail(acc.GetCredential("user_email")),
+			)
+			ssos := extractAccountSSOTokens(acc)
+			if len(ssos) == 0 {
+				result.WithoutSSO++
+				result.Items = append(result.Items, GrokG2ASSOExportItem{
+					AccountID: acc.ID,
+					Name:      acc.Name,
+					Email:     email,
+					HasSSO:    false,
+					Status:    acc.Status,
+				})
+				result.Total++
+				continue
+			}
+			for _, sso := range ssos {
+				if _, ok := seenSSO[sso]; ok {
+					continue
+				}
+				seenSSO[sso] = struct{}{}
+				result.WithSSO++
+				result.Total++
+				result.Tokens = append(result.Tokens, sso)
+				result.Items = append(result.Items, GrokG2ASSOExportItem{
+					AccountID: acc.ID,
+					Name:      acc.Name,
+					Email:     email,
+					SSO:       sso,
+					SSOMasked: maskSSOToken(sso),
+					HasSSO:    true,
+					Status:    acc.Status,
+				})
+			}
+		}
+		if len(items) == 0 || page*pageSize >= int(total) {
+			break
+		}
+		page++
+	}
+
+	slog.Info("grok_g2a_sso_export",
+		"total", result.Total,
+		"with_sso", result.WithSSO,
+		"without_sso", result.WithoutSSO,
+	)
+	response.Success(c, result)
+}
+
+// FetchG2A pulls SSO tokens from G2A via Sub2 backend (no import).
+// POST /api/v1/admin/accounts/fetch/g2a
+func (h *GrokOAuthHandler) FetchG2A(c *gin.Context) {
+	var req GrokG2AFetchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.G2ABaseURL) == "" || strings.TrimSpace(req.G2AAdminKey) == "" {
+		response.BadRequest(c, "请填写 g2a_base_url 与 g2a_admin_key（Admin Key = G2A app_key）")
+		return
+	}
+	tokens, used, tried, err := fetchSSOTokensFromG2A(c.Request.Context(), req.G2ABaseURL, req.G2AAdminKey)
+	if err != nil {
+		response.BadRequest(c, fmt.Sprintf(
+			"连接 G2A 失败: %v（已尝试: %s）。确认 G2A 已启动且 Admin Key 为 app_key；Docker 内请用宿主机可达地址如 http://172.24.80.1:8010",
+			err, strings.Join(tried, ", "),
+		))
+		return
+	}
+	slog.Info("grok_a2g_fetch", "base_url_used", used, "count", len(tokens), "tried", tried)
+	response.Success(c, GrokG2AFetchResult{
+		BaseURLUsed: used,
+		Count:       len(tokens),
+		Tokens:      tokens,
+		Tried:       tried,
+	})
+}
+
+func fetchSSOTokensFromG2A(ctx context.Context, baseURL, adminKey string) (tokens []string, used string, tried []string, err error) {
+	key := strings.TrimSpace(adminKey)
+	if key == "" {
+		return nil, "", nil, fmt.Errorf("empty admin key")
+	}
+	candidates := g2aBaseURLCandidates(baseURL)
+	if len(candidates) == 0 {
+		return nil, "", nil, fmt.Errorf("empty g2a_base_url")
+	}
+	client := &http.Client{Timeout: 25 * time.Second}
+	var lastErr error
+	for _, base := range candidates {
+		tried = append(tried, base)
+		endpoint := strings.TrimRight(base, "/") + "/admin/api/tokens"
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if reqErr != nil {
+			lastErr = reqErr
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "Sub2API-G2A-Bridge/1.0")
+		resp, doErr := client.Do(req)
+		if doErr != nil {
+			lastErr = doErr
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			lastErr = fmt.Errorf("%s HTTP %d (Admin Key 错误：请用 app_key，不是 api_key)", base, resp.StatusCode)
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("%s HTTP %d: %s", base, resp.StatusCode, truncateRunes(string(body), 180))
+			continue
+		}
+		parsed, parseErr := extractTokensFromA2GJSON(string(body))
+		if parseErr != nil {
+			lastErr = fmt.Errorf("%s invalid payload: %v", base, parseErr)
+			continue
+		}
+		out := make([]string, 0, len(parsed))
+		seen := make(map[string]struct{}, len(parsed))
+		for _, raw := range parsed {
+			tok := xai.NormalizeSSOToken(raw)
+			if tok == "" {
+				continue
+			}
+			if _, ok := seen[tok]; ok {
+				continue
+			}
+			seen[tok] = struct{}{}
+			out = append(out, tok)
+		}
+		return out, base, tried, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("all candidates failed")
+	}
+	return nil, "", tried, lastErr
+}
+
+func g2aBaseURLCandidates(raw string) []string {
+	base := strings.TrimSpace(raw)
+	if base == "" {
+		return nil
+	}
+	if !strings.Contains(base, "://") {
+		base = "http://" + base
+	}
+	base = strings.TrimRight(base, "/")
+	out := []string{}
+	seen := map[string]struct{}{}
+	add := func(s string) {
+		s = strings.TrimRight(strings.TrimSpace(s), "/")
+		if s == "" {
+			return
+		}
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	add(base)
+
+	u, err := url.Parse(base)
+	if err != nil {
+		return out
+	}
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	altPorts := []string{}
+	if port == "8010" {
+		altPorts = append(altPorts, "8012")
+	} else if port == "8012" {
+		altPorts = append(altPorts, "8010")
+	}
+	host := u.Hostname()
+	rewriteHosts := []string{}
+	if host == "127.0.0.1" || host == "localhost" || host == "0.0.0.0" {
+		if v := strings.TrimSpace(os.Getenv("G2A_HOST_REACHABLE")); v != "" {
+			rewriteHosts = append(rewriteHosts, v)
+		}
+		if peer := strings.TrimSpace(os.Getenv("GATEWAY_PEER_G2A_BASE_URL")); peer != "" {
+			if pu, e := url.Parse(peer); e == nil && pu.Hostname() != "" {
+				rewriteHosts = append(rewriteHosts, pu.Hostname())
+			}
+		}
+		rewriteHosts = append(rewriteHosts, "host.docker.internal", "172.24.80.1")
+	}
+	for _, p := range altPorts {
+		u2 := *u
+		u2.Host = net.JoinHostPort(u.Hostname(), p)
+		add(strings.TrimRight(u2.String(), "/"))
+	}
+	for _, h := range rewriteHosts {
+		u2 := *u
+		u2.Host = net.JoinHostPort(h, port)
+		add(strings.TrimRight(u2.String(), "/"))
+		for _, p := range altPorts {
+			u3 := *u
+			u3.Host = net.JoinHostPort(h, p)
+			add(strings.TrimRight(u3.String(), "/"))
+		}
+	}
+	return out
+}
+
+func truncateRunes(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+func (h *GrokOAuthHandler) listExistingGrokIdentitySets(ctx context.Context) (map[string]struct{}, map[string]struct{}, error) {
+	ssoSet := make(map[string]struct{})
+	emailSet := make(map[string]struct{})
+	page := 1
+	pageSize := dataPageCap
+	for {
+		items, total, err := h.adminService.ListAccounts(ctx, page, pageSize, service.PlatformGrok, "", "", "", 0, "", "created_at", "desc")
+		if err != nil {
+			return nil, nil, err
+		}
+		for i := range items {
+			for _, sso := range extractAccountSSOTokens(items[i]) {
+				ssoSet[sso] = struct{}{}
+			}
+			for _, email := range extractAccountEmails(items[i]) {
+				emailSet[email] = struct{}{}
+			}
+		}
+		if len(items) == 0 || page*pageSize >= int(total) {
+			break
+		}
+		page++
+	}
+	return ssoSet, emailSet, nil
+}
+
+func (h *GrokOAuthHandler) listExistingGrokSSOSet(ctx context.Context) (map[string]struct{}, error) {
+	sso, _, err := h.listExistingGrokIdentitySets(ctx)
+	return sso, err
+}
+
+func extractAccountSSOTokens(account service.Account) []string {
+	candidates := []string{
+		account.GetCredential("sso"),
+		account.GetCredential("sso_token"),
+		account.GetCredential("ssoToken"),
+	}
+	result := make([]string, 0, 1)
+	seen := make(map[string]struct{})
+	for _, raw := range candidates {
+		token := xai.NormalizeSSOToken(raw)
+		if token == "" {
+			continue
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		result = append(result, token)
+	}
+	return result
+}
+
+func extractAccountEmails(account service.Account) []string {
+	candidates := []string{
+		account.GetCredential("email"),
+		account.GetCredential("user_email"),
+		account.GetCredential("userEmail"),
+	}
+	// Some historical rows only put email in the account name like "user@x.com".
+	if strings.Contains(account.Name, "@") {
+		candidates = append(candidates, account.Name)
+	}
+	result := make([]string, 0, 1)
+	seen := make(map[string]struct{})
+	for _, raw := range candidates {
+		email := normalizeGrokEmail(raw)
+		if email == "" {
+			continue
+		}
+		if _, ok := seen[email]; ok {
+			continue
+		}
+		seen[email] = struct{}{}
+		result = append(result, email)
+	}
+	return result
+}
+
+func parseGrokA2GTokens(req GrokA2GImportRequest) ([]string, []string) {
+	rawChunks := make([]string, 0, 4)
+	if strings.TrimSpace(req.Content) != "" {
+		rawChunks = append(rawChunks, req.Content)
+	}
+	for _, c := range req.Contents {
+		if strings.TrimSpace(c) != "" {
+			rawChunks = append(rawChunks, c)
+		}
+	}
+
+	tokens := make([]string, 0, 64)
+	seen := make(map[string]struct{})
+	var errs []string
+
+	appendToken := func(raw string) {
+		token := xai.NormalizeSSOToken(raw)
+		if token == "" {
+			return
+		}
+		if _, ok := seen[token]; ok {
+			return
+		}
+		seen[token] = struct{}{}
+		tokens = append(tokens, token)
+	}
+
+	for _, t := range req.Tokens {
+		appendToken(t)
+	}
+	for _, t := range req.SSOTokens {
+		appendToken(t)
+	}
+
+	for _, chunk := range rawChunks {
+		chunk = strings.TrimSpace(chunk)
+		if chunk == "" {
+			continue
+		}
+		// Try JSON first
+		if strings.HasPrefix(chunk, "{") || strings.HasPrefix(chunk, "[") {
+			extracted, err := extractTokensFromA2GJSON(chunk)
+			if err != nil {
+				errs = append(errs, err.Error())
+				// fall through to line parse for resilience
+			} else {
+				for _, t := range extracted {
+					appendToken(t)
+				}
+				continue
+			}
+		}
+		// TXT / multi-line paste
+		for _, line := range strings.Split(strings.NewReplacer("\r", "\n", ",", "\n").Replace(chunk), "\n") {
+			appendToken(line)
+		}
+	}
+	return tokens, errs
+}
+
+func extractTokensFromA2GJSON(raw string) ([]string, error) {
+	var anyVal any
+	if err := json.Unmarshal([]byte(raw), &anyVal); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+	out := make([]string, 0, 32)
+	var walk func(v any)
+	walk = func(v any) {
+		switch t := v.(type) {
+		case string:
+			if s := strings.TrimSpace(t); s != "" {
+				out = append(out, s)
+			}
+		case []any:
+			for _, item := range t {
+				walk(item)
+			}
+		case map[string]any:
+			// Prefer explicit token/sso fields on objects
+			found := false
+			for _, key := range []string{"token", "sso", "sso_token", "ssoToken", "sso_cookie"} {
+				if val, ok := t[key]; ok {
+					if s, ok := val.(string); ok && strings.TrimSpace(s) != "" {
+						out = append(out, s)
+						found = true
+						break
+					}
+				}
+			}
+			if found {
+				return
+			}
+			// Grok2API pool map: {basic:[...], super:[...]} — walk array values only
+			// Also accept nested Sub2API-like {accounts:[{credentials:{sso}}]}
+			if accounts, ok := t["accounts"].([]any); ok {
+				for _, acc := range accounts {
+					walk(acc)
+				}
+				return
+			}
+			if creds, ok := t["credentials"].(map[string]any); ok {
+				walk(creds)
+				return
+			}
+			// Walk pool arrays / tokens arrays
+			if tokens, ok := t["tokens"].([]any); ok {
+				walk(tokens)
+				return
+			}
+			if ssoTokens, ok := t["sso_tokens"].([]any); ok {
+				walk(ssoTokens)
+				return
+			}
+			// Heuristic: known pool names or any array values
+			for _, key := range []string{"basic", "super", "heavy", "console", "items"} {
+				if arr, ok := t[key].([]any); ok {
+					walk(arr)
+					found = true
+				}
+			}
+			if found {
+				return
+			}
+			// Fallback: walk all values that are arrays or objects with token-ish keys
+			for _, val := range t {
+				switch val.(type) {
+				case []any, map[string]any:
+					walk(val)
+				}
+			}
+		}
+	}
+	walk(anyVal)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("JSON contained no SSO tokens")
+	}
+	return out, nil
+}
+
+func maskSSOToken(token string) string {
+	if len(token) <= 16 {
+		return token
+	}
+	return token[:8] + "..." + token[len(token)-8:]
+}
+
+func normalizeGrokEmail(raw string) string {
+	email := strings.ToLower(strings.TrimSpace(raw))
+	if email == "" || !strings.Contains(email, "@") {
+		return ""
+	}
+	return email
+}
+
+func firstNonEmptyA2G(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func accountIDFromDTO(account *dto.Account) int64 {
+	if account == nil {
+		return 0
+	}
+	return account.ID
+}
+
+func (h *GrokOAuthHandler) findGrokAccountBySSO(ctx context.Context, sso string) (*service.Account, error) {
+	sso = xai.NormalizeSSOToken(sso)
+	if sso == "" {
+		return nil, nil
+	}
+	page := 1
+	pageSize := dataPageCap
+	for {
+		items, total, err := h.adminService.ListAccounts(ctx, page, pageSize, service.PlatformGrok, "", "", "", 0, "", "created_at", "desc")
+		if err != nil {
+			return nil, err
+		}
+		for i := range items {
+			for _, existing := range extractAccountSSOTokens(items[i]) {
+				if existing == sso {
+					acc := items[i]
+					return &acc, nil
+				}
+			}
+		}
+		if len(items) == 0 || page*pageSize >= int(total) {
+			break
+		}
+		page++
+	}
+	return nil, nil
+}
+
+func (h *GrokOAuthHandler) findGrokAccountByEmail(ctx context.Context, email string) (*service.Account, error) {
+	email = normalizeGrokEmail(email)
+	if email == "" {
+		return nil, nil
+	}
+	page := 1
+	pageSize := dataPageCap
+	for {
+		items, total, err := h.adminService.ListAccounts(ctx, page, pageSize, service.PlatformGrok, "", "", "", 0, "", "created_at", "desc")
+		if err != nil {
+			return nil, err
+		}
+		for i := range items {
+			for _, existing := range extractAccountEmails(items[i]) {
+				if existing == email {
+					acc := items[i]
+					return &acc, nil
+				}
+			}
+		}
+		if len(items) == 0 || page*pageSize >= int(total) {
+			break
+		}
+		page++
+	}
+	return nil, nil
+}
